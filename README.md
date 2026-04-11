@@ -102,6 +102,3 @@ Foreground terminal usage on macOS is documented here:
 
 - `docs/macos-foreground-client-guide.md`
 
-## Status
-
-Current implementation is the first production-oriented MVP. It covers the existing Linux-server to macOS-client workflow and replaces the earlier Python watcher/client pair with a Go codebase.

@@ -102,6 +102,3 @@ macOS 前台终端运行指南在这里：
 
 - `docs/macos-foreground-client-guide.md`
 
-## 当前状态
-
-当前实现是第一版面向实际使用的 MVP。它覆盖了现在的 Linux server 到 macOS client 工作流，并用 Go 代码替代了之前的 Python watcher/client 方案。
