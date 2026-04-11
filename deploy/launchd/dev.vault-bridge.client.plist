@@ -1,0 +1,56 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+  <dict>
+    <key>Label</key>
+    <string>dev.vault-bridge.client</string>
+
+    <key>ProgramArguments</key>
+    <array>
+      <string>/bin/bash</string>
+      <string>/opt/vault-bridge/scripts/run-macos-client.sh</string>
+    </array>
+
+    <key>EnvironmentVariables</key>
+    <dict>
+      <key>SERVER</key>
+      <string>http://server-host:9090</string>
+      <key>LOCAL_ROOT</key>
+      <string>/Users/your-user/Documents/vault-bridge</string>
+      <key>STATE_DIR</key>
+      <string>/Users/your-user/Library/Application Support/vault-bridge</string>
+      <key>LOG_FILE</key>
+      <string>/Users/your-user/Library/Logs/vault-bridge/client.log</string>
+      <key>STREAM</key>
+      <string>1</string>
+      <key>SYNC_MODE</key>
+      <string>auto</string>
+      <key>RSYNC_SOURCE</key>
+      <string>server-host:/srv/vault-bridge/source/</string>
+      <key>RSYNC_BIN</key>
+      <string>/opt/homebrew/bin/rsync</string>
+      <key>RSYNC_SHELL</key>
+      <string>ssh</string>
+      <key>STREAM_POLL_INTERVAL</key>
+      <string>1s</string>
+      <key>DEBOUNCE</key>
+      <string>1s</string>
+      <key>RECONNECT</key>
+      <string>5s</string>
+      <key>BUILD_ON_RUN</key>
+      <string>0</string>
+    </dict>
+
+    <key>RunAtLoad</key>
+    <true/>
+
+    <key>KeepAlive</key>
+    <true/>
+
+    <key>StandardOutPath</key>
+    <string>/Users/your-user/Library/Logs/vault-bridge/stdout.log</string>
+
+    <key>StandardErrorPath</key>
+    <string>/Users/your-user/Library/Logs/vault-bridge/stderr.log</string>
+  </dict>
+</plist>

@@ -1,0 +1,20 @@
+{
+  "tracked_suffixes": [
+    ".md",
+    ".png",
+    ".jpg",
+    ".jpeg",
+    ".gif",
+    ".webp",
+    ".svg",
+    ".pdf",
+    ".canvas"
+  ],
+  "excluded_dirs": [
+    ".git",
+    ".obsidian"
+  ],
+  "excluded_files": [
+    ".DS_Store"
+  ]
+}
