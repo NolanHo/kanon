@@ -6,7 +6,7 @@ Chinese version: [README_zh.md](README_zh.md)
 
 ## Overview
 
-`vault-bridge` targets the case where the source of truth stays on a Linux server and a macOS client needs a near-real-time local mirror.
+`vault-bridge` solves one specific workflow: keep documentation on a remote Linux machine, sync it to a local macOS vault, then browse and search it with Obsidian.
 
 Current project scope:
 
@@ -15,6 +15,29 @@ Current project scope:
 - one-way sync from server to client
 - markdown and common vault assets
 - operator-friendly deployment with plain binaries and shell wrappers
+
+## Primary Use Case
+
+Typical flow:
+
+1. docs live on a remote Linux host
+2. `vault-bridge-server` watches that remote docs tree
+3. `vault-bridge-client` pulls incremental updates to a local directory
+4. Obsidian opens that local directory as a vault
+
+This makes the remote docs tree readable locally without moving the source of truth.
+
+## How It Works
+
+```mermaid
+flowchart LR
+    A[Remote docs tree on Linux] --> B[vault-bridge-server]
+    B --> C[Change journal and file endpoints]
+    D[vault-bridge-client on macOS] -->|SSH tunnel for control plane| C
+    D -->|rsync or HTTP for file transfer| A
+    D --> E[Local vault mirror]
+    F[Obsidian] --> E
+```
 
 ## Features
 
@@ -25,12 +48,6 @@ Current project scope:
 - HTTP fallback when `rsync` is unavailable or failing
 - built-in SSH tunnel for the HTTP control plane when the server port is not directly reachable
 - configurable filter rules through `config/filter.json`
-
-## Architecture
-
-- server: watches the authoritative root, stores a snapshot plus append-only event log, and serves change and file endpoints over HTTP
-- client: consumes the event stream, coalesces updates, deletes removed paths locally, and fetches changed files through `rsync` or HTTP
-- transport split: HTTP for journal/control traffic, `rsync` or HTTP for file transfer
 
 ## Repository Layout
 
@@ -51,7 +68,7 @@ Build:
 go build ./...
 ```
 
-Run the server:
+Start the server on the Linux host:
 
 ```bash
 ./bin/vault-bridge-server \
@@ -61,7 +78,7 @@ Run the server:
   -filter-config ./config/filter.json
 ```
 
-Run the macOS client in foreground stream mode:
+Start the macOS client in foreground stream mode:
 
 ```bash
 ./bin/vault-bridge-client \
@@ -75,6 +92,26 @@ Run the macOS client in foreground stream mode:
   -rsync-source server-host:/srv/vault-bridge/source/ \
   -rsync-bin /opt/homebrew/bin/rsync
 ```
+
+Open the local directory in Obsidian after the first sync:
+
+```text
+$HOME/Documents/vault-bridge
+```
+
+## Use It With Obsidian
+
+Once the client is running, the local mirror behaves like a normal Obsidian vault.
+
+Recommended workflow:
+
+1. run `vault-bridge-client` in foreground stream mode
+2. wait for the first sync to finish
+3. open the local mirror directory in Obsidian
+4. keep the client running while you read the docs
+5. stop the client with `Ctrl+C` when you no longer need live updates
+
+If you want a shell shortcut, add an alias that starts the client with your actual server host, vault path, and `rsync` settings.
 
 ## Configuration
 
@@ -112,4 +149,3 @@ This repository includes example deployment files:
 Foreground terminal usage on macOS is documented here:
 
 - `docs/macos-foreground-client-guide.md`
-

@@ -6,7 +6,7 @@
 
 ## 项目概览
 
-这个项目面向一种很具体的场景：权威内容留在 Linux server 上，本地 macOS client 需要一个接近实时的镜像副本。
+`vault-bridge` 解决的是一个很具体的工作流：文档保存在远端 Linux 机器上，同步到本地 macOS 的 vault，然后通过 Obsidian 浏览和检索。
 
 当前项目范围：
 
@@ -15,6 +15,29 @@
 - 同步方向为 server 到 client 的单向同步
 - 内容类型是 markdown 和常见 vault 附件
 - 部署方式优先简单可控，使用普通二进制和 shell wrapper
+
+## 核心使用场景
+
+典型流程：
+
+1. docs 保存在远端 Linux 主机上
+2. `vault-bridge-server` 监控远端 docs 目录
+3. `vault-bridge-client` 把增量更新拉到本地目录
+4. Obsidian 打开这个本地目录作为 vault
+
+这样可以在不迁移 source of truth 的前提下，把远端 docs 以本地可读的方式打开。
+
+## 工作方式
+
+```mermaid
+flowchart LR
+    A[Linux 上的远端 docs 目录] --> B[vault-bridge-server]
+    B --> C[变更日志和文件接口]
+    D[macOS 上的 vault-bridge-client] -->|通过 SSH 隧道访问 control plane| C
+    D -->|通过 rsync 或 HTTP 拉文件| A
+    D --> E[本地 vault 镜像]
+    F[Obsidian] --> E
+```
 
 ## 功能
 
@@ -25,12 +48,6 @@
 - `rsync` 不可用或失败时回退到 HTTP
 - 当 server 端口不能直连时，client 可内置启动 SSH 隧道承载 HTTP control plane
 - 通过 `config/filter.json` 配置过滤规则
-
-## 架构
-
-- server: 监控权威根目录，维护快照和追加式事件日志，并通过 HTTP 提供变更接口和文件接口
-- client: 消费事件流，合并一批变更，删除本地失效路径，并通过 `rsync` 或 HTTP 拉取变更文件
-- 传输分层: journal/control plane 走 HTTP，文件数据面走 `rsync` 或 HTTP
 
 ## 仓库结构
 
@@ -51,7 +68,7 @@
 go build ./...
 ```
 
-启动 server：
+在 Linux 主机上启动 server：
 
 ```bash
 ./bin/vault-bridge-server \
@@ -61,7 +78,7 @@ go build ./...
   -filter-config ./config/filter.json
 ```
 
-以前台 stream 模式启动 macOS client：
+在 macOS 上以前台 stream 模式启动 client：
 
 ```bash
 ./bin/vault-bridge-client \
@@ -75,6 +92,26 @@ go build ./...
   -rsync-source server-host:/srv/vault-bridge/source/ \
   -rsync-bin /opt/homebrew/bin/rsync
 ```
+
+第一次同步完成后，在 Obsidian 里打开这个本地目录：
+
+```text
+$HOME/Documents/vault-bridge
+```
+
+## 如何配合 Obsidian 使用
+
+client 跑起来以后，本地镜像目录就和普通 Obsidian vault 没区别。
+
+推荐工作流：
+
+1. 以前台 stream 模式运行 `vault-bridge-client`
+2. 等待第一次同步结束
+3. 在 Obsidian 中打开本地镜像目录
+4. 阅读 docs 时保持 client 持续运行
+5. 不需要实时更新时，用 `Ctrl+C` 停掉 client
+
+如果你想简化命令，可以加一个 alias，把实际的 server host、vault 路径和 `rsync` 参数写进去。
 
 ## 配置
 
@@ -112,4 +149,3 @@ server 端过滤规则放在 `config/filter.json`。
 macOS 前台终端运行指南在这里：
 
 - `docs/macos-foreground-client-guide.md`
-
