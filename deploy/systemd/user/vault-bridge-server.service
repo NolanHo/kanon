@@ -5,7 +5,7 @@ After=default.target
 [Service]
 Type=simple
 Environment=HOME=%h
-Environment=ADDR=:9090
+Environment=ADDR=:39090
 Environment=ROOT=/srv/vault-bridge/source
 Environment=STATE_DIR=%h/.local/state/vault-bridge/server
 Environment=CONFIG_FILE=/opt/vault-bridge/config/filter.json

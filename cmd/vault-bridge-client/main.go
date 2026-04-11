@@ -2,11 +2,13 @@ package main
 
 import (
 	"bufio"
+	"bytes"
 	"encoding/json"
 	"errors"
 	"flag"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"net/url"
 	"os"
@@ -22,6 +24,7 @@ import (
 )
 
 type syncClient struct {
+	serverURL        *url.URL
 	server           string
 	localRoot        string
 	stateDir         string
@@ -39,6 +42,8 @@ type syncClient struct {
 	rsyncShell       string
 	httpClient       *http.Client
 	streamHTTPClient *http.Client
+	tunnel           *sshTunnel
+	bannerPrinted    bool
 }
 
 type batchStats struct {
@@ -53,11 +58,22 @@ type batchStats struct {
 	DurationNS     int64    `json:"duration_ns"`
 }
 
+type sshTunnel struct {
+	sshBin     string
+	host       string
+	remoteHost string
+	remotePort int
+	localPort  int
+	cmd        *exec.Cmd
+	waitCh     chan error
+	stderr     *bytes.Buffer
+}
+
 func main() {
 	defaultState := filepath.Join(os.Getenv("HOME"), "Library", "Application Support", "vault-bridge")
 	defaultLog := filepath.Join(defaultState, "client.log")
 
-	server := flag.String("server", "http://127.0.0.1:9090", "vault-bridge server base URL")
+	server := flag.String("server", "http://127.0.0.1:39090", "vault-bridge server base URL")
 	localRoot := flag.String("local-root", "", "destination root on macOS")
 	stateDir := flag.String("state-dir", defaultState, "client state directory")
 	logFile := flag.String("log-file", defaultLog, "jsonl log file")
@@ -70,6 +86,11 @@ func main() {
 	rsyncSource := flag.String("rsync-source", "", "rsync source root, for example server-host:/srv/vault-bridge/source/")
 	rsyncBin := flag.String("rsync-bin", "/opt/homebrew/bin/rsync", "local rsync binary")
 	rsyncShell := flag.String("rsync-shell", "ssh", "remote shell for rsync when rsync-source is remote")
+	tunnelHost := flag.String("tunnel-host", "", "SSH host used to create a local tunnel for the HTTP control plane")
+	tunnelRemoteHost := flag.String("tunnel-remote-host", "", "remote host reached from the SSH server; defaults to the host part of -server")
+	tunnelRemotePort := flag.Int("tunnel-remote-port", 0, "remote port reached from the SSH server; defaults to the port part of -server")
+	tunnelLocalPort := flag.Int("tunnel-local-port", 0, "local port for the tunnel; 0 means auto-pick a free port above 30000")
+	tunnelBin := flag.String("tunnel-bin", "ssh", "SSH client used to create the tunnel")
 	jsonOut := flag.Bool("json", false, "emit final one-shot stats as json; ignored in stream mode")
 	flag.Parse()
 
@@ -77,7 +98,26 @@ func main() {
 		fmt.Fprintln(os.Stderr, "-local-root is required")
 		os.Exit(1)
 	}
-	client, err := newSyncClient(*server, *localRoot, *stateDir, *logFile, *batchLimit, *stream, *streamPoll, *debounce, *reconnect, *syncMode, *rsyncSource, *rsyncBin, *rsyncShell)
+	client, err := newSyncClient(
+		*server,
+		*localRoot,
+		*stateDir,
+		*logFile,
+		*batchLimit,
+		*stream,
+		*streamPoll,
+		*debounce,
+		*reconnect,
+		*syncMode,
+		*rsyncSource,
+		*rsyncBin,
+		*rsyncShell,
+		*tunnelHost,
+		*tunnelRemoteHost,
+		*tunnelRemotePort,
+		*tunnelLocalPort,
+		*tunnelBin,
+	)
 	if err != nil {
 		fmt.Fprintln(os.Stderr, err)
 		os.Exit(1)
@@ -92,7 +132,7 @@ func main() {
 	}
 }
 
-func newSyncClient(server, localRoot, stateDir, logPath string, batchLimit int, stream bool, streamPoll, debounce, reconnect time.Duration, syncMode, rsyncSource, rsyncBin, rsyncShell string) (*syncClient, error) {
+func newSyncClient(server, localRoot, stateDir, logPath string, batchLimit int, stream bool, streamPoll, debounce, reconnect time.Duration, syncMode, rsyncSource, rsyncBin, rsyncShell, tunnelHost, tunnelRemoteHost string, tunnelRemotePort, tunnelLocalPort int, tunnelBin string) (*syncClient, error) {
 	server = strings.TrimRight(server, "/")
 	parsed, err := url.Parse(server)
 	if err != nil {
@@ -117,7 +157,31 @@ func newSyncClient(server, localRoot, stateDir, logPath string, batchLimit int, 
 	if syncMode != "auto" && syncMode != "rsync" && syncMode != "http" {
 		return nil, fmt.Errorf("invalid -sync-mode: %s", syncMode)
 	}
+
+	var tunnel *sshTunnel
+	if strings.TrimSpace(tunnelHost) != "" {
+		remoteHost := strings.TrimSpace(tunnelRemoteHost)
+		if remoteHost == "" {
+			remoteHost = parsed.Hostname()
+		}
+		remotePort := tunnelRemotePort
+		if remotePort == 0 {
+			remotePort = serverPort(parsed)
+		}
+		if remotePort == 0 {
+			return nil, fmt.Errorf("cannot infer remote port from -server; set -tunnel-remote-port")
+		}
+		tunnel = &sshTunnel{
+			sshBin:     strings.TrimSpace(tunnelBin),
+			host:       strings.TrimSpace(tunnelHost),
+			remoteHost: remoteHost,
+			remotePort: remotePort,
+			localPort:  tunnelLocalPort,
+		}
+	}
+
 	return &syncClient{
+		serverURL:        parsed,
 		server:           server,
 		localRoot:        localRoot,
 		stateDir:         stateDir,
@@ -135,6 +199,7 @@ func newSyncClient(server, localRoot, stateDir, logPath string, batchLimit int, 
 		rsyncShell:       strings.TrimSpace(rsyncShell),
 		httpClient:       &http.Client{Timeout: 30 * time.Second},
 		streamHTTPClient: &http.Client{},
+		tunnel:           tunnel,
 	}, nil
 }
 
@@ -158,6 +223,7 @@ func (c *syncClient) run() (*batchStats, int) {
 		return nil, 1
 	}
 	defer lock.Close()
+	defer c.closeTunnel()
 	if err := syscall.Flock(int(lock.Fd()), syscall.LOCK_EX|syscall.LOCK_NB); err != nil {
 		fmt.Fprintln(os.Stderr, "another sync is already running")
 		return nil, 1
@@ -205,8 +271,16 @@ func (c *syncClient) runOnce() (*batchStats, error) {
 }
 
 func (c *syncClient) runStream() int {
-	fmt.Printf("%s vault-bridge stream started server=%s local=%s sync_mode=%s rsync_source=%s log=%s version=%s\n", localNow(), c.server, c.localRoot, c.syncMode, c.rsyncSource, c.logPath, version.Version)
 	for {
+		if !c.bannerPrinted {
+			if err := c.printBanner(); err != nil {
+				c.recordError(err.Error(), map[string]any{"mode": "stream", "phase": "banner"})
+				fmt.Fprintln(os.Stderr, err)
+				time.Sleep(c.reconnect)
+				continue
+			}
+			c.bannerPrinted = true
+		}
 		cursor, err := c.readCursor()
 		if err != nil {
 			fmt.Fprintln(os.Stderr, err)
@@ -223,7 +297,11 @@ func (c *syncClient) runStream() int {
 }
 
 func (c *syncClient) consumeStream(cursor int64) error {
-	endpoint := fmt.Sprintf("%s/v1/stream?since=%d&limit=%d&poll_interval=%g", c.server, cursor, c.batchLimit, c.streamPoll.Seconds())
+	base, err := c.controlBase()
+	if err != nil {
+		return err
+	}
+	endpoint := fmt.Sprintf("%s/v1/stream?since=%d&limit=%d&poll_interval=%g", base, cursor, c.batchLimit, c.streamPoll.Seconds())
 	resp, err := c.streamHTTPClient.Get(endpoint)
 	if err != nil {
 		return err
@@ -321,7 +399,11 @@ func (c *syncClient) consumeStream(cursor int64) error {
 }
 
 func (c *syncClient) fetchChanges(cursor int64) (*protocol.ChangesResponse, error) {
-	endpoint := fmt.Sprintf("%s/v1/changes?since=%d&limit=%d", c.server, cursor, c.batchLimit)
+	base, err := c.controlBase()
+	if err != nil {
+		return nil, err
+	}
+	endpoint := fmt.Sprintf("%s/v1/changes?since=%d&limit=%d", base, cursor, c.batchLimit)
 	resp, err := c.httpClient.Get(endpoint)
 	if err != nil {
 		return nil, err
@@ -364,7 +446,7 @@ func (c *syncClient) applyEvents(mode string, events []protocol.Event) (*batchSt
 		DurationNS:     time.Since(start).Nanoseconds(),
 	}
 	if len(deletes) > 0 || len(upserts) > 0 {
-		c.emitPaths(upserts, deletes)
+		c.emitBatch(stats)
 		c.recordOK(stats)
 	}
 	return stats, nil
@@ -386,13 +468,12 @@ func (c *syncClient) transferUpserts(paths []string) (string, string, error) {
 		if c.canUseRsync() {
 			if err := c.transferRsync(paths); err == nil {
 				return "rsync", "", nil
-			} else {
-				fallbackReason := err.Error()
-				if httpErr := c.transferHTTP(paths); httpErr != nil {
-					return "http", fallbackReason, fmt.Errorf("rsync failed: %v; http fallback failed: %w", err, httpErr)
-				}
-				return "http", fallbackReason, nil
 			}
+			fallbackReason := "rsync failed"
+			if httpErr := c.transferHTTP(paths); httpErr != nil {
+				return "http", fallbackReason, fmt.Errorf("rsync failed and http fallback failed: %w", httpErr)
+			}
+			return "http", fallbackReason, nil
 		}
 		if err := c.transferHTTP(paths); err != nil {
 			return "http", "rsync unavailable", err
@@ -494,7 +575,11 @@ func (c *syncClient) transferHTTP(paths []string) error {
 }
 
 func (c *syncClient) downloadFile(rel string) error {
-	endpoint := fmt.Sprintf("%s/v1/file?path=%s", c.server, url.QueryEscape(rel))
+	base, err := c.controlBase()
+	if err != nil {
+		return err
+	}
+	endpoint := fmt.Sprintf("%s/v1/file?path=%s", base, url.QueryEscape(rel))
 	resp, err := c.httpClient.Get(endpoint)
 	if err != nil {
 		return err
@@ -585,14 +670,47 @@ func (c *syncClient) writeCursor(cursor int64) error {
 	return os.Rename(tmp, c.cursorPath)
 }
 
-func (c *syncClient) emitPaths(upserts, deletes []string) {
-	now := localNow()
-	for _, rel := range upserts {
-		fmt.Printf("%s upsert %s\n", now, rel)
+func (c *syncClient) emitBatch(stats *batchStats) {
+	stamp := localNow()
+	fallback := ""
+	if stats.FallbackReason != "" {
+		fallback = " fallback"
 	}
-	for _, rel := range deletes {
-		fmt.Printf("%s delete %s\n", now, rel)
+	fmt.Printf("%s sync %s put=%d del=%d%s\n", stamp, stats.TransferMode, len(stats.UpsertedPaths), len(stats.DeletedPaths), fallback)
+	for _, rel := range stats.UpsertedPaths {
+		fmt.Printf("  PUT %s\n", rel)
 	}
+	for _, rel := range stats.DeletedPaths {
+		fmt.Printf("  DEL %s\n", rel)
+	}
+}
+
+func (c *syncClient) printBanner() error {
+	control, err := c.controlBase()
+	if err != nil {
+		return err
+	}
+	fmt.Printf("vault-bridge  %s\n", version.Version)
+	fmt.Printf("  control: %s\n", control)
+	if c.tunnel != nil {
+		fmt.Printf("  tunnel:  ssh %s -> %s:%d\n", c.tunnel.host, c.tunnel.remoteHost, c.tunnel.remotePort)
+	}
+	fmt.Printf("  local:   %s\n", c.localRoot)
+	fmt.Printf("  state:   %s\n", c.stateDir)
+	fmt.Printf("  data:    %s\n", c.describeDataPlane())
+	fmt.Println()
+	return nil
+}
+
+func (c *syncClient) describeDataPlane() string {
+	desc := c.syncMode
+	if c.rsyncSource != "" {
+		desc += " rsync=" + c.rsyncSource
+	}
+	if c.syncMode == "auto" {
+		desc += " fallback=http"
+	}
+	return desc
 }
 
 func (c *syncClient) recordOK(stats *batchStats) {
@@ -609,6 +727,10 @@ func (c *syncClient) recordOK(stats *batchStats) {
 		"fallback_reason": stats.FallbackReason,
 		"duration_ns":     stats.DurationNS,
 	}
+	if c.tunnel != nil {
+		payload["control_server"] = c.server
+		payload["tunnel_host"] = c.tunnel.host
+	}
 	c.appendLog(payload)
 }
 
@@ -620,6 +742,9 @@ func (c *syncClient) recordError(msg string, extra map[string]any) {
 	}
 	for k, v := range extra {
 		payload[k] = v
+	}
+	if c.tunnel != nil {
+		payload["tunnel_host"] = c.tunnel.host
 	}
 	c.appendLog(payload)
 }
@@ -635,6 +760,142 @@ func (c *syncClient) appendLog(payload map[string]any) {
 		return
 	}
 	_, _ = file.Write(append(line, '\n'))
+}
+
+func (c *syncClient) controlBase() (string, error) {
+	if c.tunnel == nil {
+		return c.server, nil
+	}
+	if err := c.tunnel.ensure(); err != nil {
+		return "", err
+	}
+	return fmt.Sprintf("%s://127.0.0.1:%d", c.serverURL.Scheme, c.tunnel.localPort), nil
+}
+
+func (c *syncClient) closeTunnel() {
+	if c.tunnel != nil {
+		c.tunnel.close()
+	}
+}
+
+func (t *sshTunnel) ensure() error {
+	if t.host == "" {
+		return nil
+	}
+	if t.localPort == 0 {
+		port, err := pickHighPort()
+		if err != nil {
+			return err
+		}
+		t.localPort = port
+	}
+	if t.alive() {
+		return nil
+	}
+
+	if _, err := exec.LookPath(t.sshBin); err != nil {
+		return fmt.Errorf("ssh binary not found: %s", t.sshBin)
+	}
+	stderr := &bytes.Buffer{}
+	args := []string{
+		"-o", "ExitOnForwardFailure=yes",
+		"-o", "ServerAliveInterval=30",
+		"-o", "ServerAliveCountMax=3",
+		"-N",
+		"-L", fmt.Sprintf("127.0.0.1:%d:%s:%d", t.localPort, t.remoteHost, t.remotePort),
+		t.host,
+	}
+	cmd := exec.Command(t.sshBin, args...)
+	cmd.Stdout = io.Discard
+	cmd.Stderr = stderr
+	if err := cmd.Start(); err != nil {
+		return fmt.Errorf("start ssh tunnel: %w", err)
+	}
+	waitCh := make(chan error, 1)
+	go func() {
+		waitCh <- cmd.Wait()
+	}()
+	addr := fmt.Sprintf("127.0.0.1:%d", t.localPort)
+	deadline := time.Now().Add(5 * time.Second)
+	for time.Now().Before(deadline) {
+		if err := dialOK(addr); err == nil {
+			t.cmd = cmd
+			t.waitCh = waitCh
+			t.stderr = stderr
+			return nil
+		}
+		select {
+		case err := <-waitCh:
+			return fmt.Errorf("ssh tunnel failed: %v: %s", err, strings.TrimSpace(stderr.String()))
+		default:
+		}
+		time.Sleep(100 * time.Millisecond)
+	}
+	_ = cmd.Process.Kill()
+	<-waitCh
+	return fmt.Errorf("ssh tunnel did not become ready on 127.0.0.1:%d", t.localPort)
+}
+
+func (t *sshTunnel) alive() bool {
+	if t.cmd == nil || t.cmd.Process == nil {
+		return false
+	}
+	return t.cmd.Process.Signal(syscall.Signal(0)) == nil
+}
+
+func (t *sshTunnel) close() {
+	if t.cmd == nil || t.cmd.Process == nil {
+		return
+	}
+	_ = t.cmd.Process.Kill()
+	if t.waitCh != nil {
+		select {
+		case <-t.waitCh:
+		case <-time.After(2 * time.Second):
+		}
+	}
+	t.cmd = nil
+	t.waitCh = nil
+}
+
+func dialOK(addr string) error {
+	conn, err := net.DialTimeout("tcp", addr, 200*time.Millisecond)
+	if err != nil {
+		return err
+	}
+	_ = conn.Close()
+	return nil
+}
+
+func pickHighPort() (int, error) {
+	for i := 0; i < 64; i++ {
+		ln, err := net.Listen("tcp", "127.0.0.1:0")
+		if err != nil {
+			return 0, err
+		}
+		port := ln.Addr().(*net.TCPAddr).Port
+		_ = ln.Close()
+		if port > 30000 {
+			return port, nil
+		}
+	}
+	return 0, fmt.Errorf("cannot allocate a free local port above 30000")
+}
+
+func serverPort(u *url.URL) int {
+	if port := u.Port(); port != "" {
+		var p int
+		_, _ = fmt.Sscanf(port, "%d", &p)
+		return p
+	}
+	switch strings.ToLower(u.Scheme) {
+	case "https":
+		return 443
+	case "http":
+		return 80
+	default:
+		return 0
+	}
 }
 
 func coalesce(events []protocol.Event) ([]string, []string, int64) {

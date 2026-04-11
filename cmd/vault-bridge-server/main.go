@@ -19,7 +19,7 @@ import (
 )
 
 func main() {
-	addr := flag.String("addr", ":9090", "listen address")
+	addr := flag.String("addr", ":39090", "listen address")
 	root := flag.String("root", "/srv/vault-bridge/source", "authoritative content root on linux")
 	stateDir := flag.String("state-dir", os.ExpandEnv("$HOME/.local/state/vault-bridge/server"), "server state directory")
 	filterConfig := flag.String("filter-config", "", "optional filter config file")

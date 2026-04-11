@@ -5,7 +5,7 @@ SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd -- "$SCRIPT_DIR/.." && pwd)"
 BIN="$REPO_ROOT/bin/vault-bridge-server"
 
-ADDR="${ADDR:-:9090}"
+ADDR="${ADDR:-:39090}"
 ROOT="${ROOT:-/srv/vault-bridge/source}"
 STATE_DIR="${STATE_DIR:-$HOME/.local/state/vault-bridge/server}"
 CONFIG_FILE="${CONFIG_FILE:-$REPO_ROOT/config/filter.json}"

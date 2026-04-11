@@ -23,6 +23,7 @@
 - client 支持 one-shot 和长连接 stream 模式
 - 文件传输优先使用 `rsync --files-from`
 - `rsync` 不可用或失败时回退到 HTTP
+- 当 server 端口不能直连时，client 可内置启动 SSH 隧道承载 HTTP control plane
 - 通过 `config/filter.json` 配置过滤规则
 
 ## 架构
@@ -54,7 +55,7 @@ go build ./...
 
 ```bash
 ./bin/vault-bridge-server \
-  -addr :9090 \
+  -addr :39090 \
   -root /srv/vault-bridge/source \
   -state-dir "$HOME/.local/state/vault-bridge/server" \
   -filter-config ./config/filter.json
@@ -65,7 +66,9 @@ go build ./...
 ```bash
 ./bin/vault-bridge-client \
   -stream \
-  -server http://server-host:9090 \
+  -server http://127.0.0.1 \
+  -tunnel-host server-host \
+  -tunnel-remote-port 39090 \
   -local-root "$HOME/Documents/vault-bridge" \
   -state-dir "$HOME/Library/Application Support/vault-bridge" \
   -sync-mode auto \
@@ -89,6 +92,14 @@ server 端过滤规则放在 `config/filter.json`。
 - `auto`: 先尝试 `rsync`，失败时回退到 HTTP
 - `rsync`: 强制要求 `rsync`
 - `http`: 强制使用 HTTP 文件拉取
+
+隧道参数：
+
+- `-tunnel-host`: 用来暴露远端 server 端口的 SSH host
+- `-tunnel-remote-host`: 从 SSH server 视角访问的远端目标 host；默认取 `-server` 的 host 部分
+- `-tunnel-remote-port`: 远端目标端口；默认取 `-server` 的 port 部分
+- `-tunnel-local-port`: 本地转发端口；`0` 表示自动挑一个大于 `30000` 的空闲端口
+- server 默认监听端口：`39090`
 
 ## 部署
 

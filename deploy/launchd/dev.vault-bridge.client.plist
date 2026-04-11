@@ -14,7 +14,11 @@
     <key>EnvironmentVariables</key>
     <dict>
       <key>SERVER</key>
-      <string>http://server-host:9090</string>
+      <string>http://127.0.0.1</string>
+      <key>TUNNEL_HOST</key>
+      <string>server-host</string>
+      <key>TUNNEL_REMOTE_PORT</key>
+      <string>39090</string>
       <key>LOCAL_ROOT</key>
       <string>/Users/your-user/Documents/vault-bridge</string>
       <key>STATE_DIR</key>
@@ -30,6 +34,8 @@
       <key>RSYNC_BIN</key>
       <string>/opt/homebrew/bin/rsync</string>
       <key>RSYNC_SHELL</key>
+      <string>ssh</string>
+      <key>TUNNEL_BIN</key>
       <string>ssh</string>
       <key>STREAM_POLL_INTERVAL</key>
       <string>1s</string>

@@ -23,6 +23,7 @@ Current project scope:
 - one-shot sync and long-lived stream mode on the client
 - `rsync --files-from` as the preferred data path
 - HTTP fallback when `rsync` is unavailable or failing
+- built-in SSH tunnel for the HTTP control plane when the server port is not directly reachable
 - configurable filter rules through `config/filter.json`
 
 ## Architecture
@@ -54,7 +55,7 @@ Run the server:
 
 ```bash
 ./bin/vault-bridge-server \
-  -addr :9090 \
+  -addr :39090 \
   -root /srv/vault-bridge/source \
   -state-dir "$HOME/.local/state/vault-bridge/server" \
   -filter-config ./config/filter.json
@@ -65,7 +66,9 @@ Run the macOS client in foreground stream mode:
 ```bash
 ./bin/vault-bridge-client \
   -stream \
-  -server http://server-host:9090 \
+  -server http://127.0.0.1 \
+  -tunnel-host server-host \
+  -tunnel-remote-port 39090 \
   -local-root "$HOME/Documents/vault-bridge" \
   -state-dir "$HOME/Library/Application Support/vault-bridge" \
   -sync-mode auto \
@@ -89,6 +92,14 @@ Transfer modes:
 - `auto`: try `rsync` first, then fall back to HTTP
 - `rsync`: require `rsync`
 - `http`: force HTTP file fetch
+
+Tunnel flags:
+
+- `-tunnel-host`: SSH host that exposes the remote server port
+- `-tunnel-remote-host`: remote target host seen from the SSH server; defaults to the host part of `-server`
+- `-tunnel-remote-port`: remote target port; defaults to the port part of `-server`
+- `-tunnel-local-port`: local forwarded port; `0` means auto-pick a free port above `30000`
+- server default listen port: `39090`
 
 ## Deployment
 
