@@ -1,31 +1,36 @@
+<div align="center">
+
 # vault-bridge
 
-Go client/server sync for mirroring a remote document tree into a local vault.
+> Sync remote docs to a local vault, then read them in Obsidian.
 
-Chinese version: [README_zh.md](README_zh.md)
+[![Go](https://img.shields.io/badge/Go-1.22+-00ADD8.svg)](https://go.dev/)
+[![Platform](https://img.shields.io/badge/Platform-Linux%20server%20%2B%20macOS%20client-333333.svg)](#)
+[![License](https://img.shields.io/badge/License-MIT-yellow.svg)](./LICENSE)
 
-## Overview
+[Chinese](./README_zh.md) · [macOS foreground guide](./docs/macos-foreground-client-guide.md)
 
-`vault-bridge` solves one specific workflow: keep documentation on a remote Linux machine, sync it to a local macOS vault, then browse and search it with Obsidian.
+</div>
 
-Current project scope:
+---
 
-- server on Linux
-- client on macOS
-- one-way sync from server to client
-- markdown and common vault assets
-- operator-friendly deployment with plain binaries and shell wrappers
+`vault-bridge` is a Go client/server sync tool for one specific workflow:
 
-## Primary Use Case
+- keep docs on a remote Linux machine
+- sync them to a local macOS directory
+- open that local directory as an Obsidian vault
 
-Typical flow:
+The source of truth stays remote. Reading happens locally.
 
-1. docs live on a remote Linux host
-2. `vault-bridge-server` watches that remote docs tree
-3. `vault-bridge-client` pulls incremental updates to a local directory
-4. Obsidian opens that local directory as a vault
+## Why It Exists
 
-This makes the remote docs tree readable locally without moving the source of truth.
+A common docs workflow looks like this:
+
+- notes, markdown, images, and PDFs live on a Linux host
+- the Linux host is reachable through SSH, but not through a directly exposed web port
+- you want a local mirror on macOS for fast browsing, search, backlinks, and graph view in Obsidian
+
+`vault-bridge` turns that into a continuous sync loop instead of a manual copy step.
 
 ## How It Works
 
@@ -39,26 +44,15 @@ flowchart LR
     F[Obsidian] --> E
 ```
 
-## Features
+## What It Does
 
-- incremental journal with persistent cursor
-- `inotify` plus periodic reconcile on the server
-- one-shot sync and long-lived stream mode on the client
-- `rsync --files-from` as the preferred data path
-- HTTP fallback when `rsync` is unavailable or failing
-- built-in SSH tunnel for the HTTP control plane when the server port is not directly reachable
-- configurable filter rules through `config/filter.json`
-
-## Repository Layout
-
-- `cmd/vault-bridge-server/`: Linux server entrypoint
-- `cmd/vault-bridge-client/`: macOS client entrypoint
-- `internal/bridge/`: filter, journal store, reconcile, watcher
-- `internal/protocol/`: shared wire types
-- `config/`: default filter config
-- `scripts/`: runnable wrappers for server and client
-- `deploy/`: example service definitions for supervisor, `systemd`, and launchd
-- `docs/`: operator notes and environment-specific guides
+| Component | Role |
+| --- | --- |
+| `vault-bridge-server` | Watches the remote docs tree, stores a file snapshot and append-only event log, serves HTTP endpoints |
+| `vault-bridge-client` | Pulls incremental updates, maintains a local cursor, deletes removed files, fetches changed files |
+| `rsync` | Preferred file transfer path for changed files |
+| HTTP fallback | Used when `rsync` is unavailable or fails |
+| SSH tunnel | Lets the client reach the server control plane when the remote HTTP port is not directly accessible |
 
 ## Quick Start
 
@@ -78,7 +72,7 @@ Start the server on the Linux host:
   -filter-config ./config/filter.json
 ```
 
-Start the macOS client in foreground stream mode:
+Start the client on macOS in foreground stream mode:
 
 ```bash
 ./bin/vault-bridge-client \
@@ -93,31 +87,37 @@ Start the macOS client in foreground stream mode:
   -rsync-bin /opt/homebrew/bin/rsync
 ```
 
-Open the local directory in Obsidian after the first sync:
+Then open the local mirror in Obsidian:
 
 ```text
 $HOME/Documents/vault-bridge
 ```
 
-## Use It With Obsidian
+## Typical Obsidian Workflow
 
-Once the client is running, the local mirror behaves like a normal Obsidian vault.
+1. Start `vault-bridge-client` in foreground stream mode.
+2. Wait for the first sync to finish.
+3. Open the local mirror directory in Obsidian.
+4. Read, search, and navigate the docs locally.
+5. Stop the client with `Ctrl+C` when live updates are no longer needed.
 
-Recommended workflow:
+The local mirror behaves like a normal Obsidian vault. `vault-bridge` only keeps it current.
 
-1. run `vault-bridge-client` in foreground stream mode
-2. wait for the first sync to finish
-3. open the local mirror directory in Obsidian
-4. keep the client running while you read the docs
-5. stop the client with `Ctrl+C` when you no longer need live updates
+## Features
 
-If you want a shell shortcut, add an alias that starts the client with your actual server host, vault path, and `rsync` settings.
+- incremental journal with persistent cursor
+- `inotify` plus periodic reconcile on the server
+- one-shot sync and long-lived stream mode on the client
+- `rsync --files-from` as the preferred data path
+- HTTP fallback when `rsync` is unavailable or failing
+- built-in SSH tunnel for the HTTP control plane
+- configurable filter rules through `config/filter.json`
 
 ## Configuration
 
 Server-side filter rules live in `config/filter.json`.
 
-Default behavior matches the previous Python implementation:
+Default behavior:
 
 - exclude `.git/`
 - exclude `.obsidian/`
@@ -126,9 +126,11 @@ Default behavior matches the previous Python implementation:
 
 Transfer modes:
 
-- `auto`: try `rsync` first, then fall back to HTTP
-- `rsync`: require `rsync`
-- `http`: force HTTP file fetch
+| Mode | Behavior |
+| --- | --- |
+| `auto` | Try `rsync` first, then fall back to HTTP |
+| `rsync` | Require `rsync` |
+| `http` | Force HTTP file fetch |
 
 Tunnel flags:
 
@@ -136,16 +138,25 @@ Tunnel flags:
 - `-tunnel-remote-host`: remote target host seen from the SSH server; defaults to the host part of `-server`
 - `-tunnel-remote-port`: remote target port; defaults to the port part of `-server`
 - `-tunnel-local-port`: local forwarded port; `0` means auto-pick a free port above `30000`
-- server default listen port: `39090`
+- default server listen port: `39090`
 
-## Deployment
+## Repository Layout
 
-This repository includes example deployment files:
+- `cmd/vault-bridge-server/`: Linux server entrypoint
+- `cmd/vault-bridge-client/`: macOS client entrypoint
+- `internal/bridge/`: filter, journal store, reconcile, watcher
+- `internal/protocol/`: shared wire types
+- `config/`: default filter config
+- `scripts/`: runnable wrappers for server and client
+- `deploy/`: example service definitions for supervisor, `systemd`, and launchd
+- `docs/`: operator notes and environment-specific guides
+
+## Deployment Files
 
 - Linux server: `deploy/supervisor/vault-bridge-server.conf`
 - Linux user service: `deploy/systemd/user/vault-bridge-server.service`
 - macOS client: `deploy/launchd/dev.vault-bridge.client.plist`
 
-Foreground terminal usage on macOS is documented here:
+For foreground macOS usage, see:
 
 - `docs/macos-foreground-client-guide.md`
