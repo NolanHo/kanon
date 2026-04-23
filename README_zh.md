@@ -8,7 +8,7 @@
 [![Platform](https://img.shields.io/badge/Platform-Linux%20server%20%2B%20macOS%20client-333333.svg)](#)
 [![License](https://img.shields.io/badge/License-MIT-yellow.svg)](./LICENSE)
 
-[English](./README.md) · [macOS 前台运行指南](./docs/macos-foreground-client-guide.md)
+[English](./README.md) · [macOS 前台运行指南](./docs/macos-foreground-client-guide.md) · [Linux supervisord 部署指南](./docs/linux-supervisord-deploy-guide.md)
 
 </div>
 
@@ -164,6 +164,10 @@ server 端过滤规则放在 `config/filter.json`。
 - Linux server: `deploy/supervisor/vault-bridge-server.conf`
 - Linux user service: `deploy/systemd/user/vault-bridge-server.service`
 - macOS client: `deploy/launchd/dev.vault-bridge.client.plist`
+
+如果 Linux 主机上的 `vault-bridge-server` 由 `supervisord` 托管，见：
+
+- `docs/linux-supervisord-deploy-guide.md`
 
 如果你是在 macOS 终端前台运行，见：
 

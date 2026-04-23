@@ -8,7 +8,7 @@
 [![Platform](https://img.shields.io/badge/Platform-Linux%20server%20%2B%20macOS%20client-333333.svg)](#)
 [![License](https://img.shields.io/badge/License-MIT-yellow.svg)](./LICENSE)
 
-[Chinese](./README_zh.md) · [macOS foreground guide](./docs/macos-foreground-client-guide.md)
+[Chinese](./README_zh.md) · [macOS foreground guide](./docs/macos-foreground-client-guide.md) · [Linux supervisord deploy guide](./docs/linux-supervisord-deploy-guide.md)
 
 </div>
 
@@ -164,6 +164,10 @@ Tunnel flags:
 - Linux server: `deploy/supervisor/vault-bridge-server.conf`
 - Linux user service: `deploy/systemd/user/vault-bridge-server.service`
 - macOS client: `deploy/launchd/dev.vault-bridge.client.plist`
+
+For Linux hosts that run `vault-bridge-server` under `supervisord`, see:
+
+- `docs/linux-supervisord-deploy-guide.md`
 
 For foreground macOS usage, see:
 
