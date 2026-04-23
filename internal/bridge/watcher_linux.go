@@ -164,7 +164,7 @@ func (w *inotifyWatcher) Run(ctx context.Context, trigger chan<- struct{}) error
 				signal = true
 				continue
 			}
-			if mask&(inCreate|inDelete|inMovedFrom|inMovedTo|inCloseWrite|inAttrib|inDeleteSelf|inMoveSelf) != 0 {
+			if mask&(inCreate|inDelete|inMovedFrom|inMovedTo|inCloseWrite|inAttrib|inDeleteSelf|inMoveSelf) != 0 && IsTrackedFile(rel) {
 				signal = true
 			}
 		}

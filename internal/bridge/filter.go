@@ -7,6 +7,7 @@ import (
 	"os"
 	"path"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"sync"
 
@@ -14,21 +15,37 @@ import (
 )
 
 type FilterConfig struct {
-	TrackedSuffixes []string `json:"tracked_suffixes"`
-	ExcludedDirs    []string `json:"excluded_dirs"`
-	ExcludedFiles   []string `json:"excluded_files"`
+	TrackedSuffixes      []string `json:"tracked_suffixes"`
+	ExcludedDirs         []string `json:"excluded_dirs"`
+	ExcludedFiles        []string `json:"excluded_files"`
+	ExcludedPathPatterns []string `json:"excluded_path_patterns"`
+}
+
+type pathMatcher struct {
+	pattern string
+	prefix  bool
+	regex   *regexp.Regexp
+}
+
+type compiledFilterConfig struct {
+	cfg           FilterConfig
+	excludedDirs  map[string]struct{}
+	excludedFiles map[string]struct{}
+	matchers      []pathMatcher
 }
 
 var (
-	filterMu  = &sync.RWMutex{}
-	filterCfg = defaultFilterConfig()
+	filterMu       = &sync.RWMutex{}
+	filterCfg      = normalizeFilterConfig(defaultFilterConfig())
+	filterCompiled = compileFilterConfig(filterCfg)
 )
 
 func defaultFilterConfig() FilterConfig {
 	return FilterConfig{
-		TrackedSuffixes: []string{".md", ".png", ".jpg", ".jpeg", ".gif", ".webp", ".svg", ".pdf", ".canvas"},
-		ExcludedDirs:    []string{".git", ".obsidian"},
-		ExcludedFiles:   []string{".DS_Store"},
+		TrackedSuffixes:      []string{".md", ".png", ".jpg", ".jpeg", ".gif", ".webp", ".svg", ".pdf", ".canvas"},
+		ExcludedDirs:         []string{".git", ".obsidian"},
+		ExcludedFiles:        []string{".DS_Store"},
+		ExcludedPathPatterns: nil,
 	}
 }
 
@@ -61,6 +78,7 @@ func SetFilterConfig(cfg FilterConfig) {
 	filterMu.Lock()
 	defer filterMu.Unlock()
 	filterCfg = normalizeFilterConfig(cfg)
+	filterCompiled = compileFilterConfig(filterCfg)
 }
 
 func CleanRel(rel string) (string, error) {
@@ -82,39 +100,32 @@ func CleanRel(rel string) (string, error) {
 }
 
 func IsWatchableDir(rel string) bool {
-	cfg := CurrentFilterConfig()
-	excludedDirs := sliceSet(cfg.ExcludedDirs)
 	if rel == "" {
 		return true
 	}
-	for _, part := range strings.Split(rel, "/") {
-		if _, blocked := excludedDirs[part]; blocked {
-			return false
-		}
-	}
-	return true
-}
-
-func IsTrackedFile(rel string) bool {
-	cfg := CurrentFilterConfig()
-	excludedDirs := sliceSet(cfg.ExcludedDirs)
-	excludedFiles := sliceSet(cfg.ExcludedFiles)
 	clean, err := CleanRel(rel)
 	if err != nil {
 		return false
 	}
-	parts := strings.Split(clean, "/")
-	for _, part := range parts[:len(parts)-1] {
-		if _, blocked := excludedDirs[part]; blocked {
-			return false
-		}
+	return !currentCompiledFilter().isExcluded(clean)
+}
+
+func IsTrackedFile(rel string) bool {
+	clean, err := CleanRel(rel)
+	if err != nil {
+		return false
 	}
+	cfg := currentCompiledFilter()
+	if cfg.isExcluded(clean) {
+		return false
+	}
+	parts := strings.Split(clean, "/")
 	name := parts[len(parts)-1]
-	if _, blocked := excludedFiles[name]; blocked {
+	if _, blocked := cfg.excludedFiles[name]; blocked {
 		return false
 	}
 	lowerName := strings.ToLower(name)
-	for _, suffix := range cfg.TrackedSuffixes {
+	for _, suffix := range cfg.cfg.TrackedSuffixes {
 		if strings.HasSuffix(lowerName, suffix) {
 			return true
 		}
@@ -166,9 +177,10 @@ func ScanRoot(root string) (map[string]protocol.FileMeta, error) {
 
 func cloneFilterConfig(cfg FilterConfig) FilterConfig {
 	return FilterConfig{
-		TrackedSuffixes: append([]string(nil), cfg.TrackedSuffixes...),
-		ExcludedDirs:    append([]string(nil), cfg.ExcludedDirs...),
-		ExcludedFiles:   append([]string(nil), cfg.ExcludedFiles...),
+		TrackedSuffixes:      append([]string(nil), cfg.TrackedSuffixes...),
+		ExcludedDirs:         append([]string(nil), cfg.ExcludedDirs...),
+		ExcludedFiles:        append([]string(nil), cfg.ExcludedFiles...),
+		ExcludedPathPatterns: append([]string(nil), cfg.ExcludedPathPatterns...),
 	}
 }
 
@@ -199,6 +211,9 @@ func normalizeFilterConfig(cfg FilterConfig) FilterConfig {
 	for i, item := range out.ExcludedFiles {
 		out.ExcludedFiles[i] = strings.TrimSpace(item)
 	}
+	for i, item := range out.ExcludedPathPatterns {
+		out.ExcludedPathPatterns[i] = normalizePathPattern(item)
+	}
 	return out
 }
 
@@ -211,4 +226,114 @@ func sliceSet(xs []string) map[string]struct{} {
 		out[x] = struct{}{}
 	}
 	return out
+}
+
+func currentCompiledFilter() compiledFilterConfig {
+	filterMu.RLock()
+	defer filterMu.RUnlock()
+	return filterCompiled
+}
+
+func compileFilterConfig(cfg FilterConfig) compiledFilterConfig {
+	out := compiledFilterConfig{
+		cfg:           cloneFilterConfig(cfg),
+		excludedDirs:  sliceSet(cfg.ExcludedDirs),
+		excludedFiles: sliceSet(cfg.ExcludedFiles),
+	}
+	for _, pattern := range cfg.ExcludedPathPatterns {
+		matcher := compilePathMatcher(pattern)
+		if matcher.pattern == "" {
+			continue
+		}
+		out.matchers = append(out.matchers, matcher)
+	}
+	return out
+}
+
+func (cfg compiledFilterConfig) isExcluded(rel string) bool {
+	for _, part := range strings.Split(rel, "/") {
+		if _, blocked := cfg.excludedDirs[part]; blocked {
+			return true
+		}
+	}
+	for _, matcher := range cfg.matchers {
+		if matcher.matches(rel) {
+			return true
+		}
+	}
+	return false
+}
+
+func normalizePathPattern(pattern string) string {
+	pattern = strings.TrimSpace(strings.ReplaceAll(pattern, "\\", "/"))
+	if pattern == "" {
+		return ""
+	}
+	for strings.HasPrefix(pattern, "./") {
+		pattern = strings.TrimPrefix(pattern, "./")
+	}
+	pattern = strings.TrimPrefix(pattern, "/")
+	if pattern == "" {
+		return ""
+	}
+	cleaned := path.Clean(pattern)
+	if cleaned == "." {
+		return ""
+	}
+	return cleaned
+}
+
+func compilePathMatcher(pattern string) pathMatcher {
+	pattern = normalizePathPattern(pattern)
+	if pattern == "" {
+		return pathMatcher{}
+	}
+	if !strings.ContainsAny(pattern, "*?") {
+		return pathMatcher{pattern: pattern, prefix: true}
+	}
+	descendants := strings.HasSuffix(pattern, "/**")
+	base := pattern
+	if descendants {
+		base = strings.TrimSuffix(base, "/**")
+	}
+	regexText := "^" + globToRegex(base)
+	if descendants {
+		regexText += "(?:/.*)?"
+	}
+	regexText += "$"
+	return pathMatcher{
+		pattern: pattern,
+		regex:   regexp.MustCompile(regexText),
+	}
+}
+
+func (m pathMatcher) matches(rel string) bool {
+	if m.pattern == "" {
+		return false
+	}
+	if m.prefix {
+		return rel == m.pattern || strings.HasPrefix(rel, m.pattern+"/")
+	}
+	return m.regex.MatchString(rel)
+}
+
+func globToRegex(pattern string) string {
+	var b strings.Builder
+	b.Grow(len(pattern) * 2)
+	for i := 0; i < len(pattern); i++ {
+		switch pattern[i] {
+		case '*':
+			if i+1 < len(pattern) && pattern[i+1] == '*' {
+				b.WriteString(".*")
+				i++
+				continue
+			}
+			b.WriteString("[^/]*")
+		case '?':
+			b.WriteString("[^/]")
+		default:
+			b.WriteString(regexp.QuoteMeta(string(pattern[i])))
+		}
+	}
+	return b.String()
 }

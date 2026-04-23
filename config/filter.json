@@ -16,5 +16,9 @@
   ],
   "excluded_files": [
     ".DS_Store"
+  ],
+  "excluded_path_patterns": [
+    "mint/issues/issue432/02_live_validation/**",
+    "deep-research/**/.venv/**"
   ]
 }

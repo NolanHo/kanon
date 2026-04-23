@@ -123,6 +123,14 @@ server 端过滤规则放在 `config/filter.json`。
 - 排除 `.obsidian/`
 - 排除 `.DS_Store`
 - 只包含 `.md`、`.png`、`.jpg`、`.jpeg`、`.gif`、`.webp`、`.svg`、`.pdf`、`.canvas`
+- 可以通过 `excluded_path_patterns` 额外排除整棵路径子树或 glob 风格路径模式
+
+路径模式说明：
+
+- 像 `mint/issues/issue432/02_live_validation` 这样的普通路径会排除整个子树
+- `**` 可以跨目录匹配
+- `*` 和 `?` 只在单个路径段内匹配
+- 适合排除高 churn 但不需要同步的实验产物、虚拟环境等目录
 
 传输模式：
 

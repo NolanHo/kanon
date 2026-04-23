@@ -203,6 +203,10 @@ func (s *Store) Reconcile() (ReconcileResult, error) {
 		result.Deletes++
 	}
 
+	if result.Upserts == 0 && result.Deletes == 0 {
+		return result, nil
+	}
+
 	if err := s.persistLocked(); err != nil {
 		return ReconcileResult{}, err
 	}

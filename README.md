@@ -123,6 +123,14 @@ Default behavior:
 - exclude `.obsidian/`
 - exclude `.DS_Store`
 - include `.md`, `.png`, `.jpg`, `.jpeg`, `.gif`, `.webp`, `.svg`, `.pdf`, `.canvas`
+- optionally exclude whole path subtrees or glob-style path patterns with `excluded_path_patterns`
+
+Pattern notes:
+
+- a plain path like `mint/issues/issue432/02_live_validation` excludes that subtree
+- `**` matches across directory boundaries
+- `*` and `?` match within a single path segment
+- useful for pruning high-churn, non-sync content such as experiment outputs or local virtualenvs
 
 Transfer modes:
 
