@@ -13,7 +13,7 @@ func NewWatcher(_ string) (Watcher, error) {
 	return &unsupportedWatcher{}, errors.New("inotify watcher is only available on linux")
 }
 
-func (w *unsupportedWatcher) Run(ctx context.Context, trigger chan<- struct{}) error {
+func (w *unsupportedWatcher) Run(ctx context.Context, trigger chan<- WatchChange) error {
 	<-ctx.Done()
 	return ctx.Err()
 }

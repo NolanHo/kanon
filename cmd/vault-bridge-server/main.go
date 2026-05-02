@@ -10,6 +10,7 @@ import (
 	"os/signal"
 	"path/filepath"
 	"strconv"
+	"strings"
 	"syscall"
 	"time"
 
@@ -23,8 +24,8 @@ func main() {
 	root := flag.String("root", "/srv/vault-bridge/source", "authoritative content root on linux")
 	stateDir := flag.String("state-dir", os.ExpandEnv("$HOME/.local/state/vault-bridge/server"), "server state directory")
 	filterConfig := flag.String("filter-config", "", "optional filter config file")
-	reconcileInterval := flag.Duration("reconcile-interval", 10*time.Minute, "full reconcile interval")
-	watchDebounce := flag.Duration("watch-debounce", time.Second, "delay before reconciling after watcher activity")
+	reconcileInterval := flag.Duration("reconcile-interval", 30*time.Minute, "full reconcile interval")
+	watchDebounce := flag.Duration("watch-debounce", 200*time.Millisecond, "delay before reconciling after watcher activity")
 	flag.Parse()
 
 	cfg, err := bridge.LoadFilterConfig(*filterConfig)
@@ -52,37 +53,52 @@ func main() {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
-	trigger := make(chan struct{}, 1)
+	trigger := make(chan bridge.WatchChange, 16)
 	go func() {
 		if err := watcher.Run(ctx, trigger); err != nil && err != context.Canceled {
 			log.Printf("watcher error: %v", err)
 		}
 	}()
 	go func() {
+		<-ctx.Done()
+		_ = watcher.Close()
+	}()
+	go func() {
 		var tickerC <-chan time.Time
-		var ticker *time.Ticker
 		if *reconcileInterval > 0 {
-			ticker = time.NewTicker(*reconcileInterval)
+			ticker := time.NewTicker(*reconcileInterval)
 			defer ticker.Stop()
 			tickerC = ticker.C
 		}
+		drain := func(change bridge.WatchChange) []bridge.WatchChange {
+			changes := []bridge.WatchChange{change}
+			if *watchDebounce > 0 {
+				time.Sleep(*watchDebounce)
+			}
+			for {
+				select {
+				case next := <-trigger:
+					changes = append(changes, next)
+				default:
+					return compactWatchChanges(changes)
+				}
+			}
+		}
 		for {
+			if tickerC == nil {
+				select {
+				case <-ctx.Done():
+					return
+				case change := <-trigger:
+					reconcileWatchChangesAndLog(store, drain(change))
+				}
+				continue
+			}
 			select {
 			case <-ctx.Done():
 				return
-			case <-trigger:
-				if *watchDebounce > 0 {
-					time.Sleep(*watchDebounce)
-				}
-				for {
-					select {
-					case <-trigger:
-					default:
-						goto reconcile
-					}
-				}
-			reconcile:
-				reconcileAndLog(store)
+			case change := <-trigger:
+				reconcileWatchChangesAndLog(store, drain(change))
 			case <-tickerC:
 				reconcileAndLog(store)
 			}
@@ -139,7 +155,7 @@ func main() {
 			http.Error(w, err.Error(), http.StatusBadRequest)
 			return
 		}
-		poll, err := parseDurationSeconds(r, "poll_interval", time.Second)
+		poll, err := parseDurationSeconds(r, "poll_interval", 0)
 		if err != nil {
 			http.Error(w, err.Error(), http.StatusBadRequest)
 			return
@@ -151,7 +167,11 @@ func main() {
 		}
 		w.Header().Set("Content-Type", "application/x-ndjson")
 		enc := json.NewEncoder(w)
+		ctx := r.Context()
 		for {
+			if err := store.WaitForSeq(ctx, since); err != nil {
+				return
+			}
 			events, hasMore := store.EventRows(since, limit)
 			if len(events) > 0 {
 				for _, event := range events {
@@ -165,10 +185,12 @@ func main() {
 					continue
 				}
 			}
-			select {
-			case <-r.Context().Done():
-				return
-			case <-time.After(poll):
+			if poll > 0 {
+				select {
+				case <-ctx.Done():
+					return
+				case <-time.After(poll):
+				}
 			}
 		}
 	})
@@ -254,4 +276,53 @@ func reconcileAndLog(store *bridge.Store) {
 	if result.Upserts > 0 || result.Deletes > 0 {
 		log.Printf("reconcile upserts=%d deletes=%d current_seq=%d", result.Upserts, result.Deletes, store.CurrentSeq())
 	}
+}
+
+func reconcileWatchChangesAndLog(store *bridge.Store, changes []bridge.WatchChange) {
+	result := bridge.ReconcileResult{}
+	for _, change := range changes {
+		part, err := store.ReconcileWatchChange(change)
+		if err != nil {
+			log.Printf("watch reconcile error path=%s full=%t: %v", change.Path, change.Full, err)
+			return
+		}
+		result.Upserts += part.Upserts
+		result.Deletes += part.Deletes
+	}
+	if result.Upserts > 0 || result.Deletes > 0 {
+		log.Printf("watch reconcile changes=%d upserts=%d deletes=%d current_seq=%d", len(changes), result.Upserts, result.Deletes, store.CurrentSeq())
+	}
+}
+
+func compactWatchChanges(changes []bridge.WatchChange) []bridge.WatchChange {
+	for _, change := range changes {
+		if change.Full || change.Path == "" {
+			return []bridge.WatchChange{{Full: true}}
+		}
+	}
+	dirs := make(map[string]bridge.WatchChange)
+	files := make(map[string]bridge.WatchChange)
+	for _, change := range changes {
+		if change.IsDir {
+			dirs[change.Path] = change
+			continue
+		}
+		files[change.Path] = change
+	}
+	for dir := range dirs {
+		prefix := dir + "/"
+		for file := range files {
+			if file == dir || strings.HasPrefix(file, prefix) {
+				delete(files, file)
+			}
+		}
+	}
+	out := make([]bridge.WatchChange, 0, len(dirs)+len(files))
+	for _, change := range dirs {
+		out = append(out, change)
+	}
+	for _, change := range files {
+		out = append(out, change)
+	}
+	return out
 }

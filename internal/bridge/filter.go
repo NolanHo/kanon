@@ -3,34 +3,33 @@ package bridge
 import (
 	"encoding/json"
 	"fmt"
-	"io/fs"
 	"os"
 	"path"
-	"path/filepath"
 	"regexp"
 	"strings"
 	"sync"
-
-	"github.com/NolanHo/vault-bridge/internal/protocol"
 )
 
 type FilterConfig struct {
 	TrackedSuffixes      []string `json:"tracked_suffixes"`
 	ExcludedDirs         []string `json:"excluded_dirs"`
 	ExcludedFiles        []string `json:"excluded_files"`
+	ExcludedFilePatterns []string `json:"excluded_file_patterns"`
 	ExcludedPathPatterns []string `json:"excluded_path_patterns"`
 }
 
 type pathMatcher struct {
-	pattern string
-	prefix  bool
-	regex   *regexp.Regexp
+	pattern  string
+	basename bool
+	prefix   bool
+	regex    *regexp.Regexp
 }
 
 type compiledFilterConfig struct {
 	cfg           FilterConfig
 	excludedDirs  map[string]struct{}
 	excludedFiles map[string]struct{}
+	fileMatchers  []pathMatcher
 	matchers      []pathMatcher
 }
 
@@ -43,9 +42,10 @@ var (
 func defaultFilterConfig() FilterConfig {
 	return FilterConfig{
 		TrackedSuffixes:      []string{".md", ".png", ".jpg", ".jpeg", ".gif", ".webp", ".svg", ".pdf", ".canvas"},
-		ExcludedDirs:         []string{".git", ".obsidian"},
+		ExcludedDirs:         []string{".git", ".obsidian", ".venv", "venv", "node_modules", "__pycache__", ".ruff_cache", ".mypy_cache", ".pytest_cache"},
 		ExcludedFiles:        []string{".DS_Store"},
-		ExcludedPathPatterns: nil,
+		ExcludedFilePatterns: []string{"*.log", "*.tmp", "*.swp", "*.swo"},
+		ExcludedPathPatterns: []string{"logs/**", "**/logs/**", "log/**", "**/log/**"},
 	}
 }
 
@@ -121,7 +121,7 @@ func IsTrackedFile(rel string) bool {
 	}
 	parts := strings.Split(clean, "/")
 	name := parts[len(parts)-1]
-	if _, blocked := cfg.excludedFiles[name]; blocked {
+	if cfg.isExcludedFile(clean, name) {
 		return false
 	}
 	lowerName := strings.ToLower(name)
@@ -133,53 +133,12 @@ func IsTrackedFile(rel string) bool {
 	return false
 }
 
-func ScanRoot(root string) (map[string]protocol.FileMeta, error) {
-	out := make(map[string]protocol.FileMeta)
-	err := filepath.WalkDir(root, func(abs string, d fs.DirEntry, walkErr error) error {
-		if walkErr != nil {
-			return walkErr
-		}
-		rel, err := filepath.Rel(root, abs)
-		if err != nil {
-			return err
-		}
-		if rel == "." {
-			return nil
-		}
-		rel = filepath.ToSlash(rel)
-		if d.IsDir() {
-			if !IsWatchableDir(rel) {
-				return filepath.SkipDir
-			}
-			return nil
-		}
-		if !IsTrackedFile(rel) {
-			return nil
-		}
-		info, err := d.Info()
-		if err != nil {
-			return err
-		}
-		if !info.Mode().IsRegular() {
-			return nil
-		}
-		out[rel] = protocol.FileMeta{
-			MtimeNS: info.ModTime().UnixNano(),
-			Size:    info.Size(),
-		}
-		return nil
-	})
-	if err != nil {
-		return nil, err
-	}
-	return out, nil
-}
-
 func cloneFilterConfig(cfg FilterConfig) FilterConfig {
 	return FilterConfig{
 		TrackedSuffixes:      append([]string(nil), cfg.TrackedSuffixes...),
 		ExcludedDirs:         append([]string(nil), cfg.ExcludedDirs...),
 		ExcludedFiles:        append([]string(nil), cfg.ExcludedFiles...),
+		ExcludedFilePatterns: append([]string(nil), cfg.ExcludedFilePatterns...),
 		ExcludedPathPatterns: append([]string(nil), cfg.ExcludedPathPatterns...),
 	}
 }
@@ -211,6 +170,12 @@ func normalizeFilterConfig(cfg FilterConfig) FilterConfig {
 	for i, item := range out.ExcludedFiles {
 		out.ExcludedFiles[i] = strings.TrimSpace(item)
 	}
+	if len(out.ExcludedFilePatterns) == 0 {
+		out.ExcludedFilePatterns = DefaultFilterConfig().ExcludedFilePatterns
+	}
+	for i, item := range out.ExcludedFilePatterns {
+		out.ExcludedFilePatterns[i] = normalizeFilePattern(item)
+	}
 	for i, item := range out.ExcludedPathPatterns {
 		out.ExcludedPathPatterns[i] = normalizePathPattern(item)
 	}
@@ -240,6 +205,13 @@ func compileFilterConfig(cfg FilterConfig) compiledFilterConfig {
 		excludedDirs:  sliceSet(cfg.ExcludedDirs),
 		excludedFiles: sliceSet(cfg.ExcludedFiles),
 	}
+	for _, pattern := range cfg.ExcludedFilePatterns {
+		matcher := compileFileMatcher(pattern)
+		if matcher.pattern == "" {
+			continue
+		}
+		out.fileMatchers = append(out.fileMatchers, matcher)
+	}
 	for _, pattern := range cfg.ExcludedPathPatterns {
 		matcher := compilePathMatcher(pattern)
 		if matcher.pattern == "" {
@@ -264,6 +236,24 @@ func (cfg compiledFilterConfig) isExcluded(rel string) bool {
 	return false
 }
 
+func (cfg compiledFilterConfig) isExcludedFile(rel, name string) bool {
+	if _, blocked := cfg.excludedFiles[name]; blocked {
+		return true
+	}
+	for _, matcher := range cfg.fileMatchers {
+		if matcher.matches(rel) {
+			return true
+		}
+	}
+	return false
+}
+
+func normalizeFilePattern(pattern string) string {
+	pattern = strings.TrimSpace(strings.ReplaceAll(pattern, "\\", "/"))
+	pattern = strings.TrimPrefix(pattern, "/")
+	return pattern
+}
+
 func normalizePathPattern(pattern string) string {
 	pattern = strings.TrimSpace(strings.ReplaceAll(pattern, "\\", "/"))
 	if pattern == "" {
@@ -281,6 +271,19 @@ func normalizePathPattern(pattern string) string {
 		return ""
 	}
 	return cleaned
+}
+
+func compileFileMatcher(pattern string) pathMatcher {
+	pattern = normalizeFilePattern(pattern)
+	if pattern == "" {
+		return pathMatcher{}
+	}
+	basename := !strings.Contains(pattern, "/")
+	return pathMatcher{
+		pattern:  pattern,
+		basename: basename,
+		regex:    regexp.MustCompile("^" + globToRegex(pattern) + "$"),
+	}
 }
 
 func compilePathMatcher(pattern string) pathMatcher {
@@ -310,6 +313,10 @@ func compilePathMatcher(pattern string) pathMatcher {
 func (m pathMatcher) matches(rel string) bool {
 	if m.pattern == "" {
 		return false
+	}
+	if m.basename {
+		parts := strings.Split(rel, "/")
+		rel = parts[len(parts)-1]
 	}
 	if m.prefix {
 		return rel == m.pattern || strings.HasPrefix(rel, m.pattern+"/")

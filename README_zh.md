@@ -119,9 +119,9 @@ server 端过滤规则放在 `config/filter.json`。
 
 默认行为：
 
-- 排除 `.git/`
-- 排除 `.obsidian/`
+- 排除 `.git/`、`.obsidian/`、`.venv/`、`venv/`、`node_modules/`、`__pycache__/`、`.ruff_cache/`、`.mypy_cache/`、`.pytest_cache/`
 - 排除 `.DS_Store`
+- 排除 `*.log`、`*.tmp`、`*.swp`、`*.swo` 等 basename 文件模式
 - 只包含 `.md`、`.png`、`.jpg`、`.jpeg`、`.gif`、`.webp`、`.svg`、`.pdf`、`.canvas`
 - 可以通过 `excluded_path_patterns` 额外排除整棵路径子树或 glob 风格路径模式
 
@@ -130,7 +130,9 @@ server 端过滤规则放在 `config/filter.json`。
 - 像 `mint/issues/issue432/02_live_validation` 这样的普通路径会排除整个子树
 - `**` 可以跨目录匹配
 - `*` 和 `?` 只在单个路径段内匹配
-- 适合排除高 churn 但不需要同步的实验产物、虚拟环境等目录
+- `excluded_file_patterns` 只作用于文件路径；它会阻止 `*.log` 这类文件产生同步事件
+- watch 目录数只会在目录或子树被 `excluded_dirs` / `excluded_path_patterns` 排除时下降
+- 适合排除高 churn 但不需要同步的实验产物、日志目录、依赖树、虚拟环境等目录
 
 传输模式：
 

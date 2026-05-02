@@ -8,9 +8,10 @@ import (
 
 func TestPathPatternFiltering(t *testing.T) {
 	cfg := normalizeFilterConfig(FilterConfig{
-		TrackedSuffixes: []string{".md", ".png"},
-		ExcludedDirs:    []string{".git", ".obsidian"},
-		ExcludedFiles:   []string{".DS_Store"},
+		TrackedSuffixes:      []string{".md", ".png"},
+		ExcludedDirs:         []string{".git", ".obsidian"},
+		ExcludedFiles:        []string{".DS_Store"},
+		ExcludedFilePatterns: []string{"*.log"},
 		ExcludedPathPatterns: []string{
 			"mint/issues/issue432/02_live_validation/**",
 			"deep-research/**/.venv/**",
@@ -43,6 +44,11 @@ func TestPathPatternFiltering(t *testing.T) {
 			tracked:   false,
 		},
 		{
+			path:      "notes/debug.log",
+			watchable: true,
+			tracked:   false,
+		},
+		{
 			path:      "paper/myblog/wezterm/post_v1.md",
 			watchable: true,
 			tracked:   true,
@@ -61,6 +67,29 @@ func TestPathPatternFiltering(t *testing.T) {
 		if got := IsTrackedFile(tc.path); got != tc.tracked {
 			t.Fatalf("IsTrackedFile(%q)=%v want %v", tc.path, got, tc.tracked)
 		}
+	}
+}
+
+func TestExcludedFilePatternCanOverrideTrackedSuffix(t *testing.T) {
+	cfg := normalizeFilterConfig(FilterConfig{
+		TrackedSuffixes:      []string{".md", ".log"},
+		ExcludedDirs:         []string{".git"},
+		ExcludedFiles:        []string{".DS_Store"},
+		ExcludedFilePatterns: []string{"*.log", "secrets/*.md"},
+	})
+	SetFilterConfig(cfg)
+	t.Cleanup(func() {
+		SetFilterConfig(DefaultFilterConfig())
+	})
+
+	if IsTrackedFile("runs/train.log") {
+		t.Fatal("runs/train.log should be excluded by basename file pattern")
+	}
+	if IsTrackedFile("secrets/token.md") {
+		t.Fatal("secrets/token.md should be excluded by path file pattern")
+	}
+	if !IsTrackedFile("notes/keep.md") {
+		t.Fatal("notes/keep.md should remain tracked")
 	}
 }
 

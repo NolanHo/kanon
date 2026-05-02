@@ -9,8 +9,8 @@ Environment=ADDR=:39090
 Environment=ROOT=/srv/vault-bridge/source
 Environment=STATE_DIR=%h/.local/state/vault-bridge/server
 Environment=CONFIG_FILE=/opt/vault-bridge/config/filter.json
-Environment=RECONCILE_INTERVAL=10m
-Environment=WATCH_DEBOUNCE=1s
+Environment=RECONCILE_INTERVAL=30m
+Environment=WATCH_DEBOUNCE=200ms
 Environment=BUILD_ON_RUN=0
 ExecStart=/opt/vault-bridge/scripts/run-linux-server.sh
 Restart=always

@@ -2,11 +2,13 @@ package bridge
 
 import (
 	"bufio"
+	"context"
 	"encoding/json"
 	"fmt"
 	"os"
 	"path/filepath"
 	"sort"
+	"strings"
 	"sync"
 	"time"
 
@@ -25,6 +27,8 @@ type storeMeta struct {
 
 type Store struct {
 	mu           sync.RWMutex
+	notifyMu     sync.Mutex
+	notifyCh     chan struct{}
 	root         string
 	stateDir     string
 	snapshot     map[string]protocol.FileMeta
@@ -51,6 +55,7 @@ func OpenStore(root, stateDir string) (*Store, error) {
 		root:         root,
 		stateDir:     stateDir,
 		snapshot:     make(map[string]protocol.FileMeta),
+		notifyCh:     make(chan struct{}),
 		metaPath:     filepath.Join(stateDir, "meta.json"),
 		snapshotPath: filepath.Join(stateDir, "snapshot.json"),
 		eventsPath:   filepath.Join(stateDir, "events.jsonl"),
@@ -165,55 +170,163 @@ func (s *Store) EventRows(since int64, limit int) ([]protocol.Event, bool) {
 	return rows, end < len(s.events)
 }
 
+func (s *Store) WaitForSeq(ctx context.Context, since int64) error {
+	for {
+		if s.CurrentSeq() > since {
+			return nil
+		}
+		ch := s.waitCh()
+		if s.CurrentSeq() > since {
+			return nil
+		}
+		select {
+		case <-ch:
+		case <-ctx.Done():
+			return ctx.Err()
+		}
+	}
+}
+
 func (s *Store) Reconcile() (ReconcileResult, error) {
 	current, err := ScanRoot(s.root)
 	if err != nil {
 		return ReconcileResult{}, err
 	}
+	return s.applySnapshotDiff("", current)
+}
+
+func (s *Store) ReconcileWatchChange(change WatchChange) (ReconcileResult, error) {
+	if change.Full || change.Path == "" {
+		return s.Reconcile()
+	}
+	rel, err := CleanRel(change.Path)
+	if err != nil {
+		return ReconcileResult{}, err
+	}
+	if change.IsDir {
+		return s.reconcileSubtree(rel)
+	}
+	return s.reconcilePath(rel)
+}
+
+func (s *Store) reconcilePath(rel string) (ReconcileResult, error) {
+	abs := filepath.Join(s.root, filepath.FromSlash(rel))
+	info, err := os.Stat(abs)
+	exists := err == nil
+	if err != nil && !os.IsNotExist(err) {
+		return ReconcileResult{}, err
+	}
+	if exists && !info.Mode().IsRegular() {
+		exists = false
+	}
+	if exists && !IsTrackedFile(rel) {
+		exists = false
+	}
+
+	var events []protocol.Event
+	result := ReconcileResult{}
 
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
+	old, ok := s.snapshot[rel]
+	if exists {
+		meta := protocol.FileMeta{MtimeNS: info.ModTime().UnixNano(), Size: info.Size()}
+		if ok && old == meta {
+			return result, nil
+		}
+		s.snapshot[rel] = meta
+		events = append(events, s.makeEventLocked("upsert", rel, &meta))
+		result.Upserts = 1
+	} else if ok {
+		delete(s.snapshot, rel)
+		events = append(events, s.makeEventLocked("delete", rel, nil))
+		result.Deletes = 1
+	}
+
+	if result.Upserts == 0 && result.Deletes == 0 {
+		return result, nil
+	}
+	if err := s.appendEventsLocked(events); err != nil {
+		return ReconcileResult{}, err
+	}
+	if err := s.persistLocked(); err != nil {
+		return ReconcileResult{}, err
+	}
+	go s.signalChanged()
+	return result, nil
+}
+
+func (s *Store) reconcileSubtree(rel string) (ReconcileResult, error) {
+	current, err := scanSubtree(s.root, rel)
+	if err != nil {
+		return ReconcileResult{}, err
+	}
+	return s.applySnapshotDiff(rel, current)
+}
+
+func (s *Store) applySnapshotDiff(scope string, current map[string]protocol.FileMeta) (ReconcileResult, error) {
 	result := ReconcileResult{}
-	for rel, meta := range current {
+	upsertPaths := make([]string, 0, len(current))
+	for rel := range current {
+		upsertPaths = append(upsertPaths, rel)
+	}
+	sort.Strings(upsertPaths)
+
+	deletePaths := make([]string, 0)
+	prefix := ""
+	if scope != "" {
+		prefix = scope + "/"
+	}
+
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	events := make([]protocol.Event, 0, len(upsertPaths))
+	for _, rel := range upsertPaths {
+		meta := current[rel]
 		old, ok := s.snapshot[rel]
 		if ok && old == meta {
 			continue
 		}
 		s.snapshot[rel] = meta
-		if err := s.appendEventLocked("upsert", rel, &meta); err != nil {
-			return ReconcileResult{}, err
-		}
+		events = append(events, s.makeEventLocked("upsert", rel, &meta))
 		result.Upserts++
 	}
 
-	toDelete := make([]string, 0)
 	for rel := range s.snapshot {
-		if _, ok := current[rel]; ok {
+		if scope == "" {
+			if _, ok := current[rel]; ok {
+				continue
+			}
+		} else if rel != scope && !strings.HasPrefix(rel, prefix) {
+			continue
+		} else if _, ok := current[rel]; ok {
 			continue
 		}
-		toDelete = append(toDelete, rel)
+		deletePaths = append(deletePaths, rel)
 	}
-	sort.Strings(toDelete)
-	for _, rel := range toDelete {
+	sort.Strings(deletePaths)
+	for _, rel := range deletePaths {
 		delete(s.snapshot, rel)
-		if err := s.appendEventLocked("delete", rel, nil); err != nil {
-			return ReconcileResult{}, err
-		}
+		events = append(events, s.makeEventLocked("delete", rel, nil))
 		result.Deletes++
 	}
 
 	if result.Upserts == 0 && result.Deletes == 0 {
 		return result, nil
 	}
-
+	if err := s.appendEventsLocked(events); err != nil {
+		return ReconcileResult{}, err
+	}
 	if err := s.persistLocked(); err != nil {
 		return ReconcileResult{}, err
 	}
+	s.signalChanged()
 	return result, nil
 }
 
-func (s *Store) appendEventLocked(kind, rel string, meta *protocol.FileMeta) error {
+func (s *Store) makeEventLocked(kind, rel string, meta *protocol.FileMeta) protocol.Event {
 	s.currentSeq++
 	event := protocol.Event{
 		Seq:  s.currentSeq,
@@ -227,19 +340,28 @@ func (s *Store) appendEventLocked(kind, rel string, meta *protocol.FileMeta) err
 		event.MtimeNS = &mtime
 		event.Size = &size
 	}
-	line, err := json.Marshal(event)
-	if err != nil {
-		return err
+	return event
+}
+
+func (s *Store) appendEventsLocked(events []protocol.Event) error {
+	if len(events) == 0 {
+		return nil
 	}
 	file, err := os.OpenFile(s.eventsPath, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0o644)
 	if err != nil {
 		return err
 	}
 	defer file.Close()
-	if _, err := file.Write(append(line, '\n')); err != nil {
-		return err
+	for _, event := range events {
+		line, err := json.Marshal(event)
+		if err != nil {
+			return err
+		}
+		if _, err := file.Write(append(line, '\n')); err != nil {
+			return err
+		}
+		s.events = append(s.events, event)
 	}
-	s.events = append(s.events, event)
 	return nil
 }
 
@@ -249,6 +371,75 @@ func (s *Store) persistLocked() error {
 		return err
 	}
 	return writeJSONAtomic(s.snapshotPath, s.snapshot)
+}
+
+func (s *Store) waitCh() chan struct{} {
+	s.notifyMu.Lock()
+	defer s.notifyMu.Unlock()
+	return s.notifyCh
+}
+
+func (s *Store) signalChanged() {
+	s.notifyMu.Lock()
+	close(s.notifyCh)
+	s.notifyCh = make(chan struct{})
+	s.notifyMu.Unlock()
+}
+
+func scanSubtree(root, rel string) (map[string]protocol.FileMeta, error) {
+	out := make(map[string]protocol.FileMeta)
+	baseAbs := root
+	if rel != "" {
+		baseAbs = filepath.Join(root, filepath.FromSlash(rel))
+		info, err := os.Stat(baseAbs)
+		if err != nil {
+			if os.IsNotExist(err) {
+				return out, nil
+			}
+			return nil, err
+		}
+		if !info.IsDir() {
+			return nil, fmt.Errorf("not a directory: %s", rel)
+		}
+	}
+	if err := filepath.WalkDir(baseAbs, func(abs string, d os.DirEntry, walkErr error) error {
+		if walkErr != nil {
+			return walkErr
+		}
+		relPath, err := filepath.Rel(root, abs)
+		if err != nil {
+			return err
+		}
+		if relPath == "." {
+			return nil
+		}
+		relPath = filepath.ToSlash(relPath)
+		if d.IsDir() {
+			if !IsWatchableDir(relPath) {
+				return filepath.SkipDir
+			}
+			return nil
+		}
+		if !IsTrackedFile(relPath) {
+			return nil
+		}
+		info, err := d.Info()
+		if err != nil {
+			return err
+		}
+		if !info.Mode().IsRegular() {
+			return nil
+		}
+		out[relPath] = protocol.FileMeta{MtimeNS: info.ModTime().UnixNano(), Size: info.Size()}
+		return nil
+	}); err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func ScanRoot(root string) (map[string]protocol.FileMeta, error) {
+	return scanSubtree(root, "")
 }
 
 func writeJSONAtomic(path string, value any) error {

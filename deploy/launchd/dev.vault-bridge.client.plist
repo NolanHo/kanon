@@ -38,9 +38,9 @@
       <key>TUNNEL_BIN</key>
       <string>ssh</string>
       <key>STREAM_POLL_INTERVAL</key>
-      <string>1s</string>
+      <string>0</string>
       <key>DEBOUNCE</key>
-      <string>1s</string>
+      <string>200ms</string>
       <key>RECONNECT</key>
       <string>5s</string>
       <key>BUILD_ON_RUN</key>

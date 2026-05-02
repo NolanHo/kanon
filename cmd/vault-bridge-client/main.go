@@ -79,7 +79,7 @@ func main() {
 	logFile := flag.String("log-file", defaultLog, "jsonl log file")
 	stream := flag.Bool("stream", false, "keep a long-lived stream open")
 	batchLimit := flag.Int("batch-limit", 10000, "maximum journal events fetched per batch")
-	streamPoll := flag.Duration("stream-poll-interval", time.Second, "server idle poll interval for stream mode")
+	streamPoll := flag.Duration("stream-poll-interval", 0, "server idle wait in stream mode; 0 keeps the stream blocked until new changes arrive")
 	debounce := flag.Duration("debounce", time.Second, "batch streamed events before one apply")
 	reconnect := flag.Duration("reconnect", 5*time.Second, "wait before reconnecting after a stream error")
 	syncMode := flag.String("sync-mode", "auto", "transfer mode: auto, rsync, or http")

@@ -119,9 +119,9 @@ Server-side filter rules live in `config/filter.json`.
 
 Default behavior:
 
-- exclude `.git/`
-- exclude `.obsidian/`
+- exclude `.git/`, `.obsidian/`, `.venv/`, `venv/`, `node_modules/`, `__pycache__/`, `.ruff_cache/`, `.mypy_cache/`, `.pytest_cache/`
 - exclude `.DS_Store`
+- exclude basename file patterns such as `*.log`, `*.tmp`, `*.swp`, `*.swo`
 - include `.md`, `.png`, `.jpg`, `.jpeg`, `.gif`, `.webp`, `.svg`, `.pdf`, `.canvas`
 - optionally exclude whole path subtrees or glob-style path patterns with `excluded_path_patterns`
 
@@ -130,7 +130,9 @@ Pattern notes:
 - a plain path like `mint/issues/issue432/02_live_validation` excludes that subtree
 - `**` matches across directory boundaries
 - `*` and `?` match within a single path segment
-- useful for pruning high-churn, non-sync content such as experiment outputs or local virtualenvs
+- `excluded_file_patterns` applies to file paths only; it prevents sync events for files such as `*.log`
+- directory watch count only drops when a directory or subtree is excluded with `excluded_dirs` or `excluded_path_patterns`
+- useful for pruning high-churn, non-sync content such as experiment outputs, logs directories, dependency trees, or local virtualenvs
 
 Transfer modes:
 

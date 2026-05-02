@@ -12,12 +12,29 @@
   ],
   "excluded_dirs": [
     ".git",
-    ".obsidian"
+    ".obsidian",
+    ".venv",
+    "venv",
+    "node_modules",
+    "__pycache__",
+    ".ruff_cache",
+    ".mypy_cache",
+    ".pytest_cache"
   ],
   "excluded_files": [
     ".DS_Store"
   ],
+  "excluded_file_patterns": [
+    "*.log",
+    "*.tmp",
+    "*.swp",
+    "*.swo"
+  ],
   "excluded_path_patterns": [
+    "logs/**",
+    "**/logs/**",
+    "log/**",
+    "**/log/**",
     "mint/issues/issue432/02_live_validation/**",
     "deep-research/**/.venv/**"
   ]
