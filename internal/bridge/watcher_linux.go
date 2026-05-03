@@ -5,6 +5,7 @@ package bridge
 import (
 	"context"
 	"encoding/binary"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -81,6 +82,9 @@ func (w *inotifyWatcher) Rebuild() error {
 func (w *inotifyWatcher) addWatch(abs, rel string) error {
 	wd, err := syscall.InotifyAddWatch(w.fd, abs, watchMask)
 	if err != nil {
+		if rel != "" && isPathGone(err) {
+			return filepath.SkipDir
+		}
 		return fmt.Errorf("add watch %s: %w", abs, err)
 	}
 	w.wdToPath[wd] = rel
@@ -94,6 +98,9 @@ func (w *inotifyWatcher) addWatchSubtree(abs, rel string) error {
 	}
 	return filepath.WalkDir(abs, func(curAbs string, d os.DirEntry, err error) error {
 		if err != nil {
+			if isPathGone(err) && (rel != "" || curAbs != abs) {
+				return filepath.SkipDir
+			}
 			return err
 		}
 		relPath, err := filepath.Rel(w.root, curAbs)
@@ -245,4 +252,8 @@ func sendChange(ctx context.Context, ch chan<- WatchChange, change WatchChange) 
 	case <-ctx.Done():
 		return ctx.Err()
 	}
+}
+
+func isPathGone(err error) bool {
+	return os.IsNotExist(err) || errors.Is(err, syscall.ENOENT)
 }

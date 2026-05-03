@@ -22,9 +22,13 @@ type ChangesResponse struct {
 }
 
 type HealthResponse struct {
-	Status          string `json:"status"`
-	ProtocolVersion string `json:"protocol_version"`
-	CurrentSeq      int64  `json:"current_seq"`
+	Status             string `json:"status"`
+	ProtocolVersion    string `json:"protocol_version"`
+	CurrentSeq         int64  `json:"current_seq"`
+	WatcherRunning     bool   `json:"watcher_running"`
+	WatcherRestarts    int64  `json:"watcher_restarts"`
+	WatcherLastError   string `json:"watcher_last_error,omitempty"`
+	WatcherLastErrorTS string `json:"watcher_last_error_ts,omitempty"`
 }
 
 const CurrentVersion = "v0alpha1"

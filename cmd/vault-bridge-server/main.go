@@ -11,6 +11,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync"
 	"syscall"
 	"time"
 
@@ -54,11 +55,8 @@ func main() {
 	defer stop()
 
 	trigger := make(chan bridge.WatchChange, 16)
-	go func() {
-		if err := watcher.Run(ctx, trigger); err != nil && err != context.Canceled {
-			log.Printf("watcher error: %v", err)
-		}
-	}()
+	watchState := newWatcherState()
+	go runWatcher(ctx, watcher, trigger, watchState)
 	go func() {
 		<-ctx.Done()
 		_ = watcher.Close()
@@ -111,10 +109,15 @@ func main() {
 			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 			return
 		}
+		watchHealth := watchState.health()
 		writeJSON(w, protocol.HealthResponse{
-			Status:          "ok",
-			ProtocolVersion: protocol.CurrentVersion,
-			CurrentSeq:      store.CurrentSeq(),
+			Status:             "ok",
+			ProtocolVersion:    protocol.CurrentVersion,
+			CurrentSeq:         store.CurrentSeq(),
+			WatcherRunning:     watchHealth.Running,
+			WatcherRestarts:    watchHealth.Restarts,
+			WatcherLastError:   watchHealth.LastError,
+			WatcherLastErrorTS: watchHealth.LastErrorTS,
 		})
 	})
 	mux.HandleFunc("/v1/changes", func(w http.ResponseWriter, r *http.Request) {
@@ -265,6 +268,78 @@ func parseDurationSeconds(r *http.Request, key string, fallback time.Duration) (
 func writeJSON(w http.ResponseWriter, value any) {
 	w.Header().Set("Content-Type", "application/json")
 	_ = json.NewEncoder(w).Encode(value)
+}
+
+type watcherHealth struct {
+	Running     bool
+	Restarts    int64
+	LastError   string
+	LastErrorTS string
+}
+
+type watcherState struct {
+	mu sync.RWMutex
+	h  watcherHealth
+}
+
+func newWatcherState() *watcherState {
+	return &watcherState{h: watcherHealth{Running: true}}
+}
+
+func (s *watcherState) health() watcherHealth {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return s.h
+}
+
+func (s *watcherState) recordError(err error) {
+	s.mu.Lock()
+	s.h.Running = false
+	s.h.LastError = err.Error()
+	s.h.LastErrorTS = time.Now().UTC().Format(time.RFC3339)
+	s.mu.Unlock()
+}
+
+func (s *watcherState) recordRestart() {
+	s.mu.Lock()
+	s.h.Running = true
+	s.h.Restarts++
+	s.mu.Unlock()
+}
+
+func (s *watcherState) recordStop() {
+	s.mu.Lock()
+	s.h.Running = false
+	s.mu.Unlock()
+}
+
+func runWatcher(ctx context.Context, watcher bridge.Watcher, trigger chan<- bridge.WatchChange, state *watcherState) {
+	for {
+		if err := watcher.Run(ctx, trigger); err != nil && err != context.Canceled {
+			log.Printf("watcher error: %v", err)
+			state.recordError(err)
+			if rebuildErr := watcher.Rebuild(); rebuildErr != nil {
+				log.Printf("watcher rebuild error: %v", rebuildErr)
+			} else if sendWatchChange(ctx, trigger, bridge.WatchChange{Full: true}) != nil {
+				state.recordStop()
+				return
+			} else {
+				state.recordRestart()
+			}
+			continue
+		}
+		state.recordStop()
+		return
+	}
+}
+
+func sendWatchChange(ctx context.Context, ch chan<- bridge.WatchChange, change bridge.WatchChange) error {
+	select {
+	case ch <- change:
+		return nil
+	case <-ctx.Done():
+		return ctx.Err()
+	}
 }
 
 func reconcileAndLog(store *bridge.Store) {
