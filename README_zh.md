@@ -1,8 +1,8 @@
 <div align="center">
 
-# vault-bridge
+# Kanon
 
-> 把远端 docs 同步到本地 vault，然后用 Obsidian 打开看。
+> 为 `/root/docs` 建索引，并同步到本地阅读目录。
 
 [![Go](https://img.shields.io/badge/Go-1.22+-00ADD8.svg)](https://go.dev/)
 [![Platform](https://img.shields.io/badge/Platform-Linux%20server%20%2B%20macOS%20client-333333.svg)](#)
@@ -14,42 +14,41 @@
 
 ---
 
-`vault-bridge` 是一个用 Go 实现的 C/S 文档同步工具，解决的是一个很具体的工作流：
+Kanon 是面向 `/root/docs` 的 Go client/server 系统。
 
-- docs 保存在远端 Linux 机器上
-- 同步到本地 macOS 目录
-- 再把这个本地目录作为 Obsidian vault 打开
+当前职责：
 
-source of truth 保持在远端，阅读发生在本地。
+- 监听 Linux docs 树
+- 维护文件快照和追加式变更日志
+- 提供 snapshot、changes、stream、文件传输接口
+- 将变更文件同步到 macOS 本地阅读目录
 
-## 为什么需要它
+计划职责：
 
-很多文档工作流其实是这样的：
+- 为 `/root/docs` 建索引
+- 查询时返回文档位置和定位信号
 
-- 笔记、markdown、图片、PDF 放在 Linux 主机上
-- Linux 主机可以通过 SSH 连进去，但不会直接暴露 HTTP 端口
-- 你希望在 macOS 上有一个本地镜像，用 Obsidian 做搜索、双链、图谱和浏览
-
-`vault-bridge` 把这件事从手工复制变成持续同步。
+Kanon 不定义 `/root/docs` 应该如何书写或组织。
 
 ## 工作方式
 
 ```mermaid
 flowchart LR
-    A[Linux 上的远端 docs 目录] --> B[vault-bridge-server]
-    B --> C[变更日志和文件接口]
-    D[macOS 上的 vault-bridge-client] -->|通过 SSH 隧道访问 control plane| C
+    A[Linux 上的 /root/docs] --> B[kanon-server]
+    B --> C[快照、变更日志、文件接口]
+    D[macOS 上的 kanon-client] -->|通过 SSH 隧道访问 control plane| C
     D -->|通过 rsync 或 HTTP 拉文件| A
-    D --> E[本地 vault 镜像]
-    F[Obsidian] --> E
+    D --> E[本地阅读镜像]
+    F[编辑器或阅读器] --> E
+    G[查询客户端] -->|未来 query API| B
 ```
 
-## 它做什么
+## 组件
 
 | 组件 | 作用 |
 | --- | --- |
-| `vault-bridge-server` | 监控远端 docs 目录，维护文件快照和追加式事件日志，并暴露 HTTP 接口 |
-| `vault-bridge-client` | 拉取增量更新，维护本地 cursor，删除失效文件，拉取变更文件 |
+| `kanon-server` | 监听 `/root/docs`，维护文件快照和追加式事件日志，并暴露 HTTP 接口 |
+| `kanon-client` | 拉取增量更新，维护本地 cursor，删除失效文件，拉取变更文件 |
 | `rsync` | 变更文件的优先传输路径 |
 | HTTP fallback | `rsync` 不可用或失败时的回退路径 |
 | SSH tunnel | 当远端 HTTP 端口不能直连时，让 client 仍然能访问 control plane |
@@ -65,43 +64,33 @@ go build ./...
 在 Linux 主机上启动 server：
 
 ```bash
-./bin/vault-bridge-server \
+./bin/kanon-server \
   -addr :39090 \
-  -root /srv/vault-bridge/source \
-  -state-dir "$HOME/.local/state/vault-bridge/server" \
+  -root /root/docs \
+  -state-dir "$HOME/.local/state/kanon/server" \
   -filter-config ./config/filter.json
 ```
 
 在 macOS 上以前台 stream 模式启动 client：
 
 ```bash
-./bin/vault-bridge-client \
+./bin/kanon-client \
   -stream \
   -server http://127.0.0.1 \
   -tunnel-host server-host \
   -tunnel-remote-port 39090 \
-  -local-root "$HOME/Documents/vault-bridge" \
-  -state-dir "$HOME/Library/Application Support/vault-bridge" \
+  -local-root "$HOME/Documents/kanon" \
+  -state-dir "$HOME/Library/Application Support/kanon" \
   -sync-mode auto \
-  -rsync-source server-host:/srv/vault-bridge/source/ \
+  -rsync-source server-host:/root/docs/ \
   -rsync-bin /opt/homebrew/bin/rsync
 ```
 
-第一次同步完成后，在 Obsidian 里打开这个本地目录：
+第一次同步完成后，用任意本地阅读器或编辑器打开：
 
 ```text
-$HOME/Documents/vault-bridge
+$HOME/Documents/kanon
 ```
-
-## 如何配合 Obsidian 使用
-
-1. 以前台 stream 模式启动 `vault-bridge-client`。
-2. 等待第一次同步结束。
-3. 在 Obsidian 里打开本地镜像目录。
-4. 本地阅读、搜索、跳转文档。
-5. 不需要实时更新时，用 `Ctrl+C` 停掉 client。
-
-这个本地镜像目录本身就和普通 Obsidian vault 没区别，`vault-bridge` 只是负责把它同步到最新状态。
 
 ## 功能
 
@@ -109,7 +98,7 @@ $HOME/Documents/vault-bridge
 - server 端使用 `inotify` 加周期性全量 reconcile
 - client 支持 one-shot 和长连接 stream 模式
 - 文件传输优先使用 `rsync --files-from`
-- `rsync` 不可用或失败时回退到 HTTP
+- `rsync` 不可用或失败时回退到 HTTP archive 传输
 - client 内置 SSH 隧道支持 HTTP control plane
 - 通过 `config/filter.json` 配置过滤规则
 
@@ -125,22 +114,14 @@ server 端过滤规则放在 `config/filter.json`。
 - 只包含 `.md`、`.png`、`.jpg`、`.jpeg`、`.gif`、`.webp`、`.svg`、`.pdf`、`.canvas`
 - 可以通过 `excluded_path_patterns` 额外排除整棵路径子树或 glob 风格路径模式
 
-路径模式说明：
-
-- 像 `mint/issues/issue432/02_live_validation` 这样的普通路径会排除整个子树
-- `**` 可以跨目录匹配
-- `*` 和 `?` 只在单个路径段内匹配
-- `excluded_file_patterns` 只作用于文件路径；它会阻止 `*.log` 这类文件产生同步事件
-- watch 目录数只会在目录或子树被 `excluded_dirs` / `excluded_path_patterns` 排除时下降
-- 适合排除高 churn 但不需要同步的实验产物、日志目录、依赖树、虚拟环境等目录
-
 传输模式：
 
 | 模式 | 行为 |
 | --- | --- |
-| `auto` | 先尝试 `rsync`，失败时回退到 HTTP |
+| `auto` | 先尝试 `rsync`，失败时回退到 HTTP archive 传输 |
+| `archive` | 强制使用 HTTP archive 传输 |
 | `rsync` | 强制要求 `rsync` |
-| `http` | 强制使用 HTTP 拉文件 |
+| `http` | 强制使用逐文件 HTTP 拉取 |
 
 隧道参数：
 
@@ -152,9 +133,9 @@ server 端过滤规则放在 `config/filter.json`。
 
 ## 仓库结构
 
-- `cmd/vault-bridge-server/`: Linux server 入口
-- `cmd/vault-bridge-client/`: macOS client 入口
-- `internal/bridge/`: filter、journal store、reconcile、watcher
+- `cmd/kanon-server/`: Linux server 入口
+- `cmd/kanon-client/`: macOS client 入口
+- `internal/core/`: filter、journal store、reconcile、watcher
 - `internal/protocol/`: 共享协议结构
 - `config/`: 默认过滤配置
 - `scripts/`: server/client 运行脚本
@@ -163,11 +144,11 @@ server 端过滤规则放在 `config/filter.json`。
 
 ## 部署文件
 
-- Linux server: `deploy/supervisor/vault-bridge-server.conf`
-- Linux user service: `deploy/systemd/user/vault-bridge-server.service`
-- macOS client: `deploy/launchd/dev.vault-bridge.client.plist`
+- Linux server: `deploy/supervisor/kanon-server.conf`
+- Linux user service: `deploy/systemd/user/kanon-server.service`
+- macOS client: `deploy/launchd/dev.kanon.client.plist`
 
-如果 Linux 主机上的 `vault-bridge-server` 由 `supervisord` 托管，见：
+如果 Linux 主机上的 `kanon-server` 由 `supervisord` 托管，见：
 
 - `docs/linux-supervisord-deploy-guide.md`
 

@@ -20,12 +20,12 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/NolanHo/vault-bridge/internal/bridge"
-	"github.com/NolanHo/vault-bridge/internal/protocol"
-	"github.com/NolanHo/vault-bridge/internal/version"
+	"github.com/NolanHo/kanon/internal/core"
+	"github.com/NolanHo/kanon/internal/protocol"
+	"github.com/NolanHo/kanon/internal/version"
 )
 
-type syncClient struct {
+type mirrorClient struct {
 	serverURL        *url.URL
 	server           string
 	localRoot        string
@@ -74,10 +74,10 @@ type sshTunnel struct {
 }
 
 func main() {
-	defaultState := filepath.Join(os.Getenv("HOME"), "Library", "Application Support", "vault-bridge")
+	defaultState := filepath.Join(os.Getenv("HOME"), "Library", "Application Support", "kanon")
 	defaultLog := filepath.Join(defaultState, "client.log")
 
-	server := flag.String("server", "http://127.0.0.1:39090", "vault-bridge server base URL")
+	server := flag.String("server", "http://127.0.0.1:39090", "kanon server base URL")
 	localRoot := flag.String("local-root", "", "destination root on macOS")
 	stateDir := flag.String("state-dir", defaultState, "client state directory")
 	logFile := flag.String("log-file", defaultLog, "jsonl log file")
@@ -89,7 +89,7 @@ func main() {
 	verifyOnStart := flag.Bool("verify-on-start", true, "compare local mirror against server snapshot before syncing")
 	printPathLimit := flag.Int("print-path-limit", 50, "maximum changed paths printed per batch; negative prints all")
 	syncMode := flag.String("sync-mode", "auto", "transfer mode: auto, archive, rsync, or http")
-	rsyncSource := flag.String("rsync-source", "", "rsync source root, for example server-host:/srv/vault-bridge/source/")
+	rsyncSource := flag.String("rsync-source", "", "rsync source root, for example server-host:/root/docs/")
 	rsyncBin := flag.String("rsync-bin", "/opt/homebrew/bin/rsync", "local rsync binary")
 	rsyncShell := flag.String("rsync-shell", "ssh", "remote shell for rsync when rsync-source is remote")
 	tunnelHost := flag.String("tunnel-host", "", "SSH host used to create a local tunnel for the HTTP control plane")
@@ -104,7 +104,7 @@ func main() {
 		fmt.Fprintln(os.Stderr, "-local-root is required")
 		os.Exit(1)
 	}
-	client, err := newSyncClient(
+	client, err := newMirrorClient(
 		*server,
 		*localRoot,
 		*stateDir,
@@ -140,7 +140,7 @@ func main() {
 	}
 }
 
-func newSyncClient(server, localRoot, stateDir, logPath string, batchLimit int, stream bool, streamPoll, debounce, reconnect time.Duration, verifyOnStart bool, printPathLimit int, syncMode, rsyncSource, rsyncBin, rsyncShell, tunnelHost, tunnelRemoteHost string, tunnelRemotePort, tunnelLocalPort int, tunnelBin string) (*syncClient, error) {
+func newMirrorClient(server, localRoot, stateDir, logPath string, batchLimit int, stream bool, streamPoll, debounce, reconnect time.Duration, verifyOnStart bool, printPathLimit int, syncMode, rsyncSource, rsyncBin, rsyncShell, tunnelHost, tunnelRemoteHost string, tunnelRemotePort, tunnelLocalPort int, tunnelBin string) (*mirrorClient, error) {
 	server = strings.TrimRight(server, "/")
 	parsed, err := url.Parse(server)
 	if err != nil {
@@ -188,7 +188,7 @@ func newSyncClient(server, localRoot, stateDir, logPath string, batchLimit int, 
 		}
 	}
 
-	return &syncClient{
+	return &mirrorClient{
 		serverURL:        parsed,
 		server:           server,
 		localRoot:        localRoot,
@@ -213,7 +213,7 @@ func newSyncClient(server, localRoot, stateDir, logPath string, batchLimit int, 
 	}, nil
 }
 
-func (c *syncClient) run() (*batchStats, int) {
+func (c *mirrorClient) run() (*batchStats, int) {
 	if err := os.MkdirAll(c.stateDir, 0o755); err != nil {
 		fmt.Fprintln(os.Stderr, err)
 		return nil, 1
@@ -259,7 +259,7 @@ func (c *syncClient) run() (*batchStats, int) {
 	return stats, 0
 }
 
-func (c *syncClient) runOnce() (*batchStats, error) {
+func (c *mirrorClient) runOnce() (*batchStats, error) {
 	cursor, err := c.readCursor()
 	if err != nil {
 		return nil, err
@@ -288,7 +288,7 @@ func (c *syncClient) runOnce() (*batchStats, error) {
 	}
 }
 
-func (c *syncClient) runStream() int {
+func (c *mirrorClient) runStream() int {
 	for {
 		if !c.bannerPrinted {
 			if err := c.printBanner(); err != nil {
@@ -314,7 +314,7 @@ func (c *syncClient) runStream() int {
 	}
 }
 
-func (c *syncClient) consumeStream(cursor int64) error {
+func (c *mirrorClient) consumeStream(cursor int64) error {
 	base, err := c.controlBase()
 	if err != nil {
 		return err
@@ -416,7 +416,7 @@ func (c *syncClient) consumeStream(cursor int64) error {
 	}
 }
 
-func (c *syncClient) fetchSnapshot() (*protocol.SnapshotResponse, error) {
+func (c *mirrorClient) fetchSnapshot() (*protocol.SnapshotResponse, error) {
 	base, err := c.controlBase()
 	if err != nil {
 		return nil, err
@@ -438,7 +438,7 @@ func (c *syncClient) fetchSnapshot() (*protocol.SnapshotResponse, error) {
 	return &payload, nil
 }
 
-func (c *syncClient) fetchChanges(cursor int64) (*protocol.ChangesResponse, error) {
+func (c *mirrorClient) fetchChanges(cursor int64) (*protocol.ChangesResponse, error) {
 	base, err := c.controlBase()
 	if err != nil {
 		return nil, err
@@ -460,7 +460,7 @@ func (c *syncClient) fetchChanges(cursor int64) (*protocol.ChangesResponse, erro
 	return &payload, nil
 }
 
-func (c *syncClient) verifySnapshot() error {
+func (c *mirrorClient) verifySnapshot() error {
 	snapshot, err := c.fetchSnapshot()
 	if err != nil {
 		return err
@@ -501,7 +501,7 @@ func (c *syncClient) verifySnapshot() error {
 	return nil
 }
 
-func (c *syncClient) diffSnapshot(snapshot map[string]protocol.FileMeta) ([]string, []string, error) {
+func (c *mirrorClient) diffSnapshot(snapshot map[string]protocol.FileMeta) ([]string, []string, error) {
 	local, err := c.scanLocal()
 	if err != nil {
 		return nil, nil, err
@@ -528,7 +528,7 @@ func (c *syncClient) diffSnapshot(snapshot map[string]protocol.FileMeta) ([]stri
 	return deletes, upserts, nil
 }
 
-func (c *syncClient) scanLocal() (map[string]protocol.FileMeta, error) {
+func (c *mirrorClient) scanLocal() (map[string]protocol.FileMeta, error) {
 	out := make(map[string]protocol.FileMeta)
 	if err := filepath.WalkDir(c.localRoot, func(abs string, d os.DirEntry, err error) error {
 		if err != nil {
@@ -542,7 +542,7 @@ func (c *syncClient) scanLocal() (map[string]protocol.FileMeta, error) {
 			if err != nil {
 				return err
 			}
-			if !bridge.IsWatchableDir(filepath.ToSlash(rel)) {
+			if !core.IsWatchableDir(filepath.ToSlash(rel)) {
 				return filepath.SkipDir
 			}
 			return nil
@@ -559,7 +559,7 @@ func (c *syncClient) scanLocal() (map[string]protocol.FileMeta, error) {
 			return err
 		}
 		rel = filepath.ToSlash(rel)
-		if !bridge.IsTrackedFile(rel) {
+		if !core.IsTrackedFile(rel) {
 			return nil
 		}
 		out[rel] = protocol.FileMeta{MtimeNS: info.ModTime().UnixNano(), Size: info.Size()}
@@ -570,7 +570,7 @@ func (c *syncClient) scanLocal() (map[string]protocol.FileMeta, error) {
 	return out, nil
 }
 
-func (c *syncClient) applyEvents(mode string, events []protocol.Event) (*batchStats, error) {
+func (c *mirrorClient) applyEvents(mode string, events []protocol.Event) (*batchStats, error) {
 	start := time.Now()
 	deletes, upserts, cursor := coalesce(events)
 	deleted, err := c.applyDeletes(deletes)
@@ -605,7 +605,7 @@ func (c *syncClient) applyEvents(mode string, events []protocol.Event) (*batchSt
 	return stats, nil
 }
 
-func (c *syncClient) verifyEventUpserts(events []protocol.Event, upserts []string) error {
+func (c *mirrorClient) verifyEventUpserts(events []protocol.Event, upserts []string) error {
 	meta := make(map[string]protocol.FileMeta, len(events))
 	for _, event := range events {
 		if event.Kind != "upsert" || event.MtimeNS == nil || event.Size == nil {
@@ -616,7 +616,7 @@ func (c *syncClient) verifyEventUpserts(events []protocol.Event, upserts []strin
 	return c.verifyLocalFiles(meta, upserts)
 }
 
-func (c *syncClient) verifyLocalFiles(meta map[string]protocol.FileMeta, paths []string) error {
+func (c *mirrorClient) verifyLocalFiles(meta map[string]protocol.FileMeta, paths []string) error {
 	for _, rel := range paths {
 		expected, ok := meta[rel]
 		if !ok {
@@ -637,7 +637,7 @@ func (c *syncClient) verifyLocalFiles(meta map[string]protocol.FileMeta, paths [
 	return nil
 }
 
-func (c *syncClient) transferUpserts(paths []string) (string, string, error) {
+func (c *mirrorClient) transferUpserts(paths []string) (string, string, error) {
 	if len(paths) == 0 {
 		return c.idleTransferMode(), "", nil
 	}
@@ -671,7 +671,7 @@ func (c *syncClient) transferUpserts(paths []string) (string, string, error) {
 	}
 }
 
-func (c *syncClient) canUseRsync() bool {
+func (c *mirrorClient) canUseRsync() bool {
 	if c.rsyncSource == "" || c.rsyncBin == "" {
 		return false
 	}
@@ -681,14 +681,14 @@ func (c *syncClient) canUseRsync() bool {
 	return true
 }
 
-func (c *syncClient) idleTransferMode() string {
+func (c *mirrorClient) idleTransferMode() string {
 	if c.syncMode == "auto" {
 		return "archive"
 	}
 	return c.syncMode
 }
 
-func (c *syncClient) transferRsync(paths []string) error {
+func (c *mirrorClient) transferRsync(paths []string) error {
 	if c.rsyncSource == "" {
 		return fmt.Errorf("-rsync-source is required for rsync mode")
 	}
@@ -696,7 +696,7 @@ func (c *syncClient) transferRsync(paths []string) error {
 	if _, err := exec.LookPath(rs); err != nil {
 		return fmt.Errorf("rsync binary not found: %s", rs)
 	}
-	file, err := os.CreateTemp("", "vault-bridge-files-*.txt")
+	file, err := os.CreateTemp("", "kanon-files-*.txt")
 	if err != nil {
 		return err
 	}
@@ -750,7 +750,7 @@ func isRemoteRsyncSource(source string) bool {
 	return !strings.Contains(source[:idx], "/")
 }
 
-func (c *syncClient) transferArchive(paths []string) error {
+func (c *mirrorClient) transferArchive(paths []string) error {
 	base, err := c.controlBase()
 	if err != nil {
 		return err
@@ -772,7 +772,7 @@ func (c *syncClient) transferArchive(paths []string) error {
 	return c.unpackArchive(resp.Body)
 }
 
-func (c *syncClient) unpackArchive(r io.Reader) error {
+func (c *mirrorClient) unpackArchive(r io.Reader) error {
 	tr := tar.NewReader(r)
 	for {
 		h, err := tr.Next()
@@ -785,8 +785,8 @@ func (c *syncClient) unpackArchive(r io.Reader) error {
 		if h.Typeflag != tar.TypeReg && h.Typeflag != tar.TypeRegA {
 			continue
 		}
-		rel, err := bridge.CleanRel(h.Name)
-		if err != nil || !bridge.IsTrackedFile(rel) {
+		rel, err := core.CleanRel(h.Name)
+		if err != nil || !core.IsTrackedFile(rel) {
 			return fmt.Errorf("archive contains invalid path: %s", h.Name)
 		}
 		localPath := filepath.Join(c.localRoot, filepath.FromSlash(rel))
@@ -815,7 +815,7 @@ func (c *syncClient) unpackArchive(r io.Reader) error {
 	}
 }
 
-func (c *syncClient) transferHTTP(paths []string) error {
+func (c *mirrorClient) transferHTTP(paths []string) error {
 	for _, rel := range paths {
 		if err := c.downloadFile(rel); err != nil {
 			return err
@@ -824,7 +824,7 @@ func (c *syncClient) transferHTTP(paths []string) error {
 	return nil
 }
 
-func (c *syncClient) downloadFile(rel string) error {
+func (c *mirrorClient) downloadFile(rel string) error {
 	base, err := c.controlBase()
 	if err != nil {
 		return err
@@ -860,7 +860,7 @@ func (c *syncClient) downloadFile(rel string) error {
 	return os.Rename(tmp, localPath)
 }
 
-func (c *syncClient) applyDeletes(paths []string) (int, error) {
+func (c *mirrorClient) applyDeletes(paths []string) (int, error) {
 	deleted := 0
 	for _, rel := range paths {
 		localPath := filepath.Join(c.localRoot, filepath.FromSlash(rel))
@@ -883,7 +883,7 @@ func (c *syncClient) applyDeletes(paths []string) (int, error) {
 	return deleted, nil
 }
 
-func (c *syncClient) pruneEmpty(dir string) {
+func (c *mirrorClient) pruneEmpty(dir string) {
 	for dir != c.localRoot && dir != "." && dir != "/" {
 		if err := os.Remove(dir); err != nil {
 			return
@@ -892,7 +892,7 @@ func (c *syncClient) pruneEmpty(dir string) {
 	}
 }
 
-func (c *syncClient) readCursor() (int64, error) {
+func (c *mirrorClient) readCursor() (int64, error) {
 	data, err := os.ReadFile(c.cursorPath)
 	if err != nil {
 		if os.IsNotExist(err) {
@@ -912,7 +912,7 @@ func (c *syncClient) readCursor() (int64, error) {
 	return cursor, nil
 }
 
-func (c *syncClient) writeCursor(cursor int64) error {
+func (c *mirrorClient) writeCursor(cursor int64) error {
 	tmp := c.cursorPath + ".tmp"
 	if err := os.WriteFile(tmp, []byte(fmt.Sprintf("%d\n", cursor)), 0o644); err != nil {
 		return err
@@ -920,7 +920,7 @@ func (c *syncClient) writeCursor(cursor int64) error {
 	return os.Rename(tmp, c.cursorPath)
 }
 
-func (c *syncClient) emitBatch(stats *batchStats) {
+func (c *mirrorClient) emitBatch(stats *batchStats) {
 	stamp := localNow()
 	fallback := ""
 	if stats.FallbackReason != "" {
@@ -931,7 +931,7 @@ func (c *syncClient) emitBatch(stats *batchStats) {
 	c.printPaths("DEL", stats.DeletedPaths)
 }
 
-func (c *syncClient) printPaths(op string, paths []string) {
+func (c *mirrorClient) printPaths(op string, paths []string) {
 	limit := len(paths)
 	if c.printPathLimit >= 0 && limit > c.printPathLimit {
 		limit = c.printPathLimit
@@ -944,12 +944,12 @@ func (c *syncClient) printPaths(op string, paths []string) {
 	}
 }
 
-func (c *syncClient) printBanner() error {
+func (c *mirrorClient) printBanner() error {
 	control, err := c.controlBase()
 	if err != nil {
 		return err
 	}
-	fmt.Printf("vault-bridge  %s\n", version.Version)
+	fmt.Printf("kanon  %s\n", version.Version)
 	fmt.Printf("  control: %s\n", control)
 	if c.tunnel != nil {
 		fmt.Printf("  tunnel:  ssh %s -> %s:%d\n", c.tunnel.host, c.tunnel.remoteHost, c.tunnel.remotePort)
@@ -961,7 +961,7 @@ func (c *syncClient) printBanner() error {
 	return nil
 }
 
-func (c *syncClient) describeDataPlane() string {
+func (c *mirrorClient) describeDataPlane() string {
 	desc := c.syncMode
 	if c.rsyncSource != "" {
 		desc += " rsync=" + c.rsyncSource
@@ -972,7 +972,7 @@ func (c *syncClient) describeDataPlane() string {
 	return desc
 }
 
-func (c *syncClient) recordOK(stats *batchStats) {
+func (c *mirrorClient) recordOK(stats *batchStats) {
 	payload := map[string]any{
 		"ts":              utcNow(),
 		"status":          "ok",
@@ -993,7 +993,7 @@ func (c *syncClient) recordOK(stats *batchStats) {
 	c.appendLog(payload)
 }
 
-func (c *syncClient) recordError(msg string, extra map[string]any) {
+func (c *mirrorClient) recordError(msg string, extra map[string]any) {
 	payload := map[string]any{
 		"ts":     utcNow(),
 		"status": "error",
@@ -1008,7 +1008,7 @@ func (c *syncClient) recordError(msg string, extra map[string]any) {
 	c.appendLog(payload)
 }
 
-func (c *syncClient) appendLog(payload map[string]any) {
+func (c *mirrorClient) appendLog(payload map[string]any) {
 	file, err := os.OpenFile(c.logPath, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0o644)
 	if err != nil {
 		return
@@ -1021,7 +1021,7 @@ func (c *syncClient) appendLog(payload map[string]any) {
 	_, _ = file.Write(append(line, '\n'))
 }
 
-func (c *syncClient) controlBase() (string, error) {
+func (c *mirrorClient) controlBase() (string, error) {
 	if c.tunnel == nil {
 		return c.server, nil
 	}
@@ -1031,7 +1031,7 @@ func (c *syncClient) controlBase() (string, error) {
 	return fmt.Sprintf("%s://127.0.0.1:%d", c.serverURL.Scheme, c.tunnel.localPort), nil
 }
 
-func (c *syncClient) closeTunnel() {
+func (c *mirrorClient) closeTunnel() {
 	if c.tunnel != nil {
 		c.tunnel.close()
 	}

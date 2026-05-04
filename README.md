@@ -1,8 +1,8 @@
 <div align="center">
 
-# vault-bridge
+# Kanon
 
-> Sync remote docs to a local vault, then read them in Obsidian.
+> Index `/root/docs` and mirror it to a local reading directory.
 
 [![Go](https://img.shields.io/badge/Go-1.22+-00ADD8.svg)](https://go.dev/)
 [![Platform](https://img.shields.io/badge/Platform-Linux%20server%20%2B%20macOS%20client-333333.svg)](#)
@@ -14,42 +14,41 @@
 
 ---
 
-`vault-bridge` is a Go client/server sync tool for one specific workflow:
+Kanon is a Go client/server system for `/root/docs`.
 
-- keep docs on a remote Linux machine
-- sync them to a local macOS directory
-- open that local directory as an Obsidian vault
+Current responsibilities:
 
-The source of truth stays remote. Reading happens locally.
+- watch the Linux docs tree
+- maintain a file snapshot and append-only change journal
+- serve snapshot, changes, stream, and file transfer endpoints
+- mirror changed files to a local macOS reading directory
 
-## Why It Exists
+Planned responsibility:
 
-A common docs workflow looks like this:
+- build an index over `/root/docs`
+- answer query requests with document locations and routing signals
 
-- notes, markdown, images, and PDFs live on a Linux host
-- the Linux host is reachable through SSH, but not through a directly exposed web port
-- you want a local mirror on macOS for fast browsing, search, backlinks, and graph view in Obsidian
-
-`vault-bridge` turns that into a continuous sync loop instead of a manual copy step.
+Kanon does not define how `/root/docs` should be written or organized.
 
 ## How It Works
 
 ```mermaid
 flowchart LR
-    A[Remote docs tree on Linux] --> B[vault-bridge-server]
-    B --> C[Change journal and file endpoints]
-    D[vault-bridge-client on macOS] -->|SSH tunnel for control plane| C
+    A[/root/docs on Linux] --> B[kanon-server]
+    B --> C[Snapshot, change journal, file endpoints]
+    D[kanon-client on macOS] -->|SSH tunnel for control plane| C
     D -->|rsync or HTTP for file transfer| A
-    D --> E[Local vault mirror]
-    F[Obsidian] --> E
+    D --> E[Local reading mirror]
+    F[Editor or reader] --> E
+    G[Query clients] -->|future query API| B
 ```
 
-## What It Does
+## Components
 
 | Component | Role |
 | --- | --- |
-| `vault-bridge-server` | Watches the remote docs tree, stores a file snapshot and append-only event log, serves HTTP endpoints |
-| `vault-bridge-client` | Pulls incremental updates, maintains a local cursor, deletes removed files, fetches changed files |
+| `kanon-server` | Watches `/root/docs`, stores a file snapshot and append-only event log, serves HTTP endpoints |
+| `kanon-client` | Pulls incremental updates, maintains a local cursor, deletes removed files, fetches changed files |
 | `rsync` | Preferred file transfer path for changed files |
 | HTTP fallback | Used when `rsync` is unavailable or fails |
 | SSH tunnel | Lets the client reach the server control plane when the remote HTTP port is not directly accessible |
@@ -65,43 +64,33 @@ go build ./...
 Start the server on the Linux host:
 
 ```bash
-./bin/vault-bridge-server \
+./bin/kanon-server \
   -addr :39090 \
-  -root /srv/vault-bridge/source \
-  -state-dir "$HOME/.local/state/vault-bridge/server" \
+  -root /root/docs \
+  -state-dir "$HOME/.local/state/kanon/server" \
   -filter-config ./config/filter.json
 ```
 
 Start the client on macOS in foreground stream mode:
 
 ```bash
-./bin/vault-bridge-client \
+./bin/kanon-client \
   -stream \
   -server http://127.0.0.1 \
   -tunnel-host server-host \
   -tunnel-remote-port 39090 \
-  -local-root "$HOME/Documents/vault-bridge" \
-  -state-dir "$HOME/Library/Application Support/vault-bridge" \
+  -local-root "$HOME/Documents/kanon" \
+  -state-dir "$HOME/Library/Application Support/kanon" \
   -sync-mode auto \
-  -rsync-source server-host:/srv/vault-bridge/source/ \
+  -rsync-source server-host:/root/docs/ \
   -rsync-bin /opt/homebrew/bin/rsync
 ```
 
-Then open the local mirror in Obsidian:
+Then open the local mirror with the reader or editor of choice:
 
 ```text
-$HOME/Documents/vault-bridge
+$HOME/Documents/kanon
 ```
-
-## Typical Obsidian Workflow
-
-1. Start `vault-bridge-client` in foreground stream mode.
-2. Wait for the first sync to finish.
-3. Open the local mirror directory in Obsidian.
-4. Read, search, and navigate the docs locally.
-5. Stop the client with `Ctrl+C` when live updates are no longer needed.
-
-The local mirror behaves like a normal Obsidian vault. `vault-bridge` only keeps it current.
 
 ## Features
 
@@ -109,7 +98,7 @@ The local mirror behaves like a normal Obsidian vault. `vault-bridge` only keeps
 - `inotify` plus periodic reconcile on the server
 - one-shot sync and long-lived stream mode on the client
 - `rsync --files-from` as the preferred data path
-- HTTP fallback when `rsync` is unavailable or failing
+- HTTP archive fallback when `rsync` is unavailable or failing
 - built-in SSH tunnel for the HTTP control plane
 - configurable filter rules through `config/filter.json`
 
@@ -125,22 +114,14 @@ Default behavior:
 - include `.md`, `.png`, `.jpg`, `.jpeg`, `.gif`, `.webp`, `.svg`, `.pdf`, `.canvas`
 - optionally exclude whole path subtrees or glob-style path patterns with `excluded_path_patterns`
 
-Pattern notes:
-
-- a plain path like `mint/issues/issue432/02_live_validation` excludes that subtree
-- `**` matches across directory boundaries
-- `*` and `?` match within a single path segment
-- `excluded_file_patterns` applies to file paths only; it prevents sync events for files such as `*.log`
-- directory watch count only drops when a directory or subtree is excluded with `excluded_dirs` or `excluded_path_patterns`
-- useful for pruning high-churn, non-sync content such as experiment outputs, logs directories, dependency trees, or local virtualenvs
-
 Transfer modes:
 
 | Mode | Behavior |
 | --- | --- |
-| `auto` | Try `rsync` first, then fall back to HTTP |
+| `auto` | Try `rsync` first, then fall back to HTTP archive transfer |
+| `archive` | Force HTTP archive transfer |
 | `rsync` | Require `rsync` |
-| `http` | Force HTTP file fetch |
+| `http` | Force one-file-at-a-time HTTP transfer |
 
 Tunnel flags:
 
@@ -152,22 +133,22 @@ Tunnel flags:
 
 ## Repository Layout
 
-- `cmd/vault-bridge-server/`: Linux server entrypoint
-- `cmd/vault-bridge-client/`: macOS client entrypoint
-- `internal/bridge/`: filter, journal store, reconcile, watcher
+- `cmd/kanon-server/`: Linux server entrypoint
+- `cmd/kanon-client/`: macOS client entrypoint
+- `internal/core/`: filter, journal store, reconcile, watcher
 - `internal/protocol/`: shared wire types
 - `config/`: default filter config
-- `scripts/`: runnable wrappers for server and client
-- `deploy/`: example service definitions for supervisor, `systemd`, and launchd
+- `scripts/`: server/client run scripts
+- `deploy/`: supervisor, `systemd`, and launchd examples
 - `docs/`: operator notes and environment-specific guides
 
 ## Deployment Files
 
-- Linux server: `deploy/supervisor/vault-bridge-server.conf`
-- Linux user service: `deploy/systemd/user/vault-bridge-server.service`
-- macOS client: `deploy/launchd/dev.vault-bridge.client.plist`
+- Linux server: `deploy/supervisor/kanon-server.conf`
+- Linux user service: `deploy/systemd/user/kanon-server.service`
+- macOS client: `deploy/launchd/dev.kanon.client.plist`
 
-For Linux hosts that run `vault-bridge-server` under `supervisord`, see:
+For Linux hosts that run `kanon-server` under `supervisord`, see:
 
 - `docs/linux-supervisord-deploy-guide.md`
 

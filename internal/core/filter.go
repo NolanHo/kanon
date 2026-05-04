@@ -1,4 +1,4 @@
-package bridge
+package core
 
 import (
 	"encoding/json"

@@ -1,4 +1,4 @@
-package bridge
+package core
 
 import (
 	"bufio"
@@ -12,7 +12,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/NolanHo/vault-bridge/internal/protocol"
+	"github.com/NolanHo/kanon/internal/protocol"
 )
 
 type ReconcileResult struct {

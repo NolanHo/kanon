@@ -3,12 +3,12 @@
 <plist version="1.0">
   <dict>
     <key>Label</key>
-    <string>dev.vault-bridge.client</string>
+    <string>dev.kanon.client</string>
 
     <key>ProgramArguments</key>
     <array>
       <string>/bin/bash</string>
-      <string>/opt/vault-bridge/scripts/run-macos-client.sh</string>
+      <string>/opt/kanon/scripts/run-kanon-client.sh</string>
     </array>
 
     <key>EnvironmentVariables</key>
@@ -20,17 +20,17 @@
       <key>TUNNEL_REMOTE_PORT</key>
       <string>39090</string>
       <key>LOCAL_ROOT</key>
-      <string>/Users/your-user/Documents/vault-bridge</string>
+      <string>/Users/your-user/Documents/kanon</string>
       <key>STATE_DIR</key>
-      <string>/Users/your-user/Library/Application Support/vault-bridge</string>
+      <string>/Users/your-user/Library/Application Support/kanon</string>
       <key>LOG_FILE</key>
-      <string>/Users/your-user/Library/Logs/vault-bridge/client.log</string>
+      <string>/Users/your-user/Library/Logs/kanon/client.log</string>
       <key>STREAM</key>
       <string>1</string>
       <key>SYNC_MODE</key>
       <string>auto</string>
       <key>RSYNC_SOURCE</key>
-      <string>server-host:/srv/vault-bridge/source/</string>
+      <string>server-host:/root/docs/</string>
       <key>RSYNC_BIN</key>
       <string>/opt/homebrew/bin/rsync</string>
       <key>RSYNC_SHELL</key>
@@ -54,9 +54,9 @@
     <true/>
 
     <key>StandardOutPath</key>
-    <string>/Users/your-user/Library/Logs/vault-bridge/stdout.log</string>
+    <string>/Users/your-user/Library/Logs/kanon/stdout.log</string>
 
     <key>StandardErrorPath</key>
-    <string>/Users/your-user/Library/Logs/vault-bridge/stderr.log</string>
+    <string>/Users/your-user/Library/Logs/kanon/stderr.log</string>
   </dict>
 </plist>

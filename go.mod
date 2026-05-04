@@ -1,3 +1,3 @@
-module github.com/NolanHo/vault-bridge
+module github.com/NolanHo/kanon
 
 go 1.26.1

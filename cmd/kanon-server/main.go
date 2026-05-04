@@ -17,27 +17,27 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/NolanHo/vault-bridge/internal/bridge"
-	"github.com/NolanHo/vault-bridge/internal/protocol"
-	"github.com/NolanHo/vault-bridge/internal/version"
+	"github.com/NolanHo/kanon/internal/core"
+	"github.com/NolanHo/kanon/internal/protocol"
+	"github.com/NolanHo/kanon/internal/version"
 )
 
 func main() {
 	addr := flag.String("addr", ":39090", "listen address")
-	root := flag.String("root", "/srv/vault-bridge/source", "authoritative content root on linux")
-	stateDir := flag.String("state-dir", os.ExpandEnv("$HOME/.local/state/vault-bridge/server"), "server state directory")
+	root := flag.String("root", "/root/docs", "authoritative content root on linux")
+	stateDir := flag.String("state-dir", os.ExpandEnv("$HOME/.local/state/kanon/server"), "server state directory")
 	filterConfig := flag.String("filter-config", "", "optional filter config file")
 	reconcileInterval := flag.Duration("reconcile-interval", 30*time.Minute, "full reconcile interval")
 	watchDebounce := flag.Duration("watch-debounce", 200*time.Millisecond, "delay before reconciling after watcher activity")
 	flag.Parse()
 
-	cfg, err := bridge.LoadFilterConfig(*filterConfig)
+	cfg, err := core.LoadFilterConfig(*filterConfig)
 	if err != nil {
 		log.Fatal(err)
 	}
-	bridge.SetFilterConfig(cfg)
+	core.SetFilterConfig(cfg)
 
-	store, err := bridge.OpenStore(*root, *stateDir)
+	store, err := core.OpenStore(*root, *stateDir)
 	if err != nil {
 		log.Fatal(err)
 	}
@@ -50,7 +50,7 @@ func main() {
 	metrics.recordReconcile(true, result, time.Since(initialStart))
 	log.Printf("initial reconcile upserts=%d deletes=%d current_seq=%d", result.Upserts, result.Deletes, store.CurrentSeq())
 
-	watcher, err := bridge.NewWatcher(*root)
+	watcher, err := core.NewWatcher(*root)
 	if err != nil {
 		log.Fatal(err)
 	}
@@ -59,7 +59,7 @@ func main() {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
-	trigger := make(chan bridge.WatchChange, 4096)
+	trigger := make(chan core.WatchChange, 4096)
 	watchState := newWatcherState()
 	go runWatcher(ctx, watcher, trigger, watchState)
 	go func() {
@@ -73,8 +73,8 @@ func main() {
 			defer ticker.Stop()
 			tickerC = ticker.C
 		}
-		drain := func(change bridge.WatchChange) []bridge.WatchChange {
-			changes := []bridge.WatchChange{change}
+		drain := func(change core.WatchChange) []core.WatchChange {
+			changes := []core.WatchChange{change}
 			if *watchDebounce > 0 {
 				time.Sleep(*watchDebounce)
 			}
@@ -246,8 +246,8 @@ func main() {
 			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 			return
 		}
-		rel, err := bridge.CleanRel(r.URL.Query().Get("path"))
-		if err != nil || !bridge.IsTrackedFile(rel) {
+		rel, err := core.CleanRel(r.URL.Query().Get("path"))
+		if err != nil || !core.IsTrackedFile(rel) {
 			http.NotFound(w, r)
 			return
 		}
@@ -267,7 +267,7 @@ func main() {
 		_ = server.Shutdown(shutdownCtx)
 	}()
 
-	log.Printf("vault-bridge-server version=%s commit=%s addr=%s root=%s state_dir=%s filter_config=%s", version.Version, version.Commit, *addr, *root, *stateDir, *filterConfig)
+	log.Printf("kanon-server version=%s commit=%s addr=%s root=%s state_dir=%s filter_config=%s", version.Version, version.Commit, *addr, *root, *stateDir, *filterConfig)
 	if err := server.ListenAndServe(); err != nil && err != http.ErrServerClosed {
 		log.Fatal(err)
 	}
@@ -318,11 +318,11 @@ func cleanArchivePaths(paths []string) ([]string, error) {
 	out := make([]string, 0, len(paths))
 	seen := make(map[string]struct{}, len(paths))
 	for _, raw := range paths {
-		rel, err := bridge.CleanRel(raw)
+		rel, err := core.CleanRel(raw)
 		if err != nil {
 			return nil, err
 		}
-		if !bridge.IsTrackedFile(rel) {
+		if !core.IsTrackedFile(rel) {
 			return nil, os.ErrNotExist
 		}
 		if _, ok := seen[rel]; ok {
@@ -395,7 +395,7 @@ func (m *serverMetrics) health() serverHealth {
 	return m.h
 }
 
-func (m *serverMetrics) recordReconcile(full bool, result bridge.ReconcileResult, d time.Duration) {
+func (m *serverMetrics) recordReconcile(full bool, result core.ReconcileResult, d time.Duration) {
 	m.mu.Lock()
 	m.h.LastReconcileTS = time.Now().UTC().Format(time.RFC3339)
 	m.h.LastReconcileFull = full
@@ -454,14 +454,14 @@ func (s *watcherState) recordStop() {
 	s.mu.Unlock()
 }
 
-func runWatcher(ctx context.Context, watcher bridge.Watcher, trigger chan<- bridge.WatchChange, state *watcherState) {
+func runWatcher(ctx context.Context, watcher core.Watcher, trigger chan<- core.WatchChange, state *watcherState) {
 	for {
 		if err := watcher.Run(ctx, trigger); err != nil && err != context.Canceled {
 			log.Printf("watcher error: %v", err)
 			state.recordError(err)
 			if rebuildErr := watcher.Rebuild(); rebuildErr != nil {
 				log.Printf("watcher rebuild error: %v", rebuildErr)
-			} else if sendWatchChange(ctx, trigger, bridge.WatchChange{Full: true}) != nil {
+			} else if sendWatchChange(ctx, trigger, core.WatchChange{Full: true}) != nil {
 				state.recordStop()
 				return
 			} else {
@@ -474,7 +474,7 @@ func runWatcher(ctx context.Context, watcher bridge.Watcher, trigger chan<- brid
 	}
 }
 
-func sendWatchChange(ctx context.Context, ch chan<- bridge.WatchChange, change bridge.WatchChange) error {
+func sendWatchChange(ctx context.Context, ch chan<- core.WatchChange, change core.WatchChange) error {
 	select {
 	case ch <- change:
 		return nil
@@ -483,7 +483,7 @@ func sendWatchChange(ctx context.Context, ch chan<- bridge.WatchChange, change b
 	}
 }
 
-func reconcileAndLog(store *bridge.Store, metrics *serverMetrics) {
+func reconcileAndLog(store *core.Store, metrics *serverMetrics) {
 	start := time.Now()
 	result, err := store.Reconcile()
 	d := time.Since(start)
@@ -497,9 +497,9 @@ func reconcileAndLog(store *bridge.Store, metrics *serverMetrics) {
 	}
 }
 
-func reconcileWatchChangesAndLog(store *bridge.Store, changes []bridge.WatchChange, metrics *serverMetrics) {
+func reconcileWatchChangesAndLog(store *core.Store, changes []core.WatchChange, metrics *serverMetrics) {
 	start := time.Now()
-	result := bridge.ReconcileResult{}
+	result := core.ReconcileResult{}
 	full := false
 	for _, change := range changes {
 		full = full || change.Full || change.Path == ""
@@ -518,14 +518,14 @@ func reconcileWatchChangesAndLog(store *bridge.Store, changes []bridge.WatchChan
 	}
 }
 
-func compactWatchChanges(changes []bridge.WatchChange) []bridge.WatchChange {
+func compactWatchChanges(changes []core.WatchChange) []core.WatchChange {
 	for _, change := range changes {
 		if change.Full || change.Path == "" {
-			return []bridge.WatchChange{{Full: true}}
+			return []core.WatchChange{{Full: true}}
 		}
 	}
-	dirs := make(map[string]bridge.WatchChange)
-	files := make(map[string]bridge.WatchChange)
+	dirs := make(map[string]core.WatchChange)
+	files := make(map[string]core.WatchChange)
 	for _, change := range changes {
 		if change.IsDir {
 			dirs[change.Path] = change
@@ -541,7 +541,7 @@ func compactWatchChanges(changes []bridge.WatchChange) []bridge.WatchChange {
 			}
 		}
 	}
-	out := make([]bridge.WatchChange, 0, len(dirs)+len(files))
+	out := make([]core.WatchChange, 0, len(dirs)+len(files))
 	for _, change := range dirs {
 		out = append(out, change)
 	}

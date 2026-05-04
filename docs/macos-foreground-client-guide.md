@@ -1,8 +1,8 @@
 # macOS foreground client guide
 
-This guide shows how to run the `vault-bridge` client in a macOS terminal foreground session so it can be started and stopped manually.
+This guide shows how to run the `kanon` client in a macOS terminal foreground session so it can be started and stopped manually.
 
-Use stream mode. Stop with `Ctrl+C`. Start again with the same command. The client resumes from the saved cursor under `~/Library/Application Support/vault-bridge/`.
+Use stream mode. Stop with `Ctrl+C`. Start again with the same command. The client resumes from the saved cursor under `~/Library/Application Support/kanon/`.
 
 ## When the server port is not directly reachable
 
@@ -41,19 +41,19 @@ ssh server-host 'echo ok'
 ```bash
 mkdir -p "$HOME/code"
 cd "$HOME/code"
-if [ -d vault-bridge/.git ]; then
-  cd vault-bridge && git pull --ff-only
+if [ -d kanon/.git ]; then
+  cd kanon && git pull --ff-only
 else
-  git clone https://github.com/NolanHo/vault-bridge.git
-  cd vault-bridge
+  git clone https://github.com/NolanHo/kanon.git
+  cd kanon
 fi
 ```
 
 ## Build the client binary
 
 ```bash
-cd "$HOME/code/vault-bridge"
-go build -o bin/vault-bridge-client ./cmd/vault-bridge-client
+cd "$HOME/code/kanon"
+go build -o bin/kanon-client ./cmd/kanon-client
 ```
 
 ## One-shot validation
@@ -61,15 +61,15 @@ go build -o bin/vault-bridge-client ./cmd/vault-bridge-client
 Run this once before the long-lived stream. It validates SSH, tunnel setup, local path permissions, and transfer mode.
 
 ```bash
-cd "$HOME/code/vault-bridge"
-./bin/vault-bridge-client \
+cd "$HOME/code/kanon"
+./bin/kanon-client \
   -server http://127.0.0.1 \
   -tunnel-host server-host \
   -tunnel-remote-port 39090 \
-  -local-root "$HOME/Documents/vault-bridge" \
-  -state-dir "$HOME/Library/Application Support/vault-bridge" \
+  -local-root "$HOME/Documents/kanon" \
+  -state-dir "$HOME/Library/Application Support/kanon" \
   -sync-mode auto \
-  -rsync-source server-host:/srv/vault-bridge/source/ \
+  -rsync-source server-host:/root/docs/ \
   -rsync-bin /opt/homebrew/bin/rsync \
   -json
 ```
@@ -84,16 +84,16 @@ Expected result:
 This is the normal persistent foreground mode:
 
 ```bash
-cd "$HOME/code/vault-bridge"
-./bin/vault-bridge-client \
+cd "$HOME/code/kanon"
+./bin/kanon-client \
   -stream \
   -server http://127.0.0.1 \
   -tunnel-host server-host \
   -tunnel-remote-port 39090 \
-  -local-root "$HOME/Documents/vault-bridge" \
-  -state-dir "$HOME/Library/Application Support/vault-bridge" \
+  -local-root "$HOME/Documents/kanon" \
+  -state-dir "$HOME/Library/Application Support/kanon" \
   -sync-mode auto \
-  -rsync-source server-host:/srv/vault-bridge/source/ \
+  -rsync-source server-host:/root/docs/ \
   -rsync-bin /opt/homebrew/bin/rsync \
   -stream-poll-interval 1s \
   -debounce 1s \
@@ -111,12 +111,12 @@ If you want a fixed local forwarded port instead of auto-selection, add:
 Startup now prints a banner instead of one long line, for example:
 
 ```text
-vault-bridge  dev
+kanon  dev
   control: http://127.0.0.1:30081
   tunnel:  ssh server-host -> 127.0.0.1:39090
-  local:   /Users/your-user/Documents/vault-bridge
-  state:   /Users/your-user/Library/Application Support/vault-bridge
-  data:    auto rsync=server-host:/srv/vault-bridge/source/ fallback=http
+  local:   /Users/your-user/Documents/kanon
+  state:   /Users/your-user/Library/Application Support/kanon
+  data:    auto rsync=server-host:/root/docs/ fallback=http
 ```
 
 When a batch arrives, output is grouped:
@@ -135,7 +135,7 @@ If `auto` had to fall back to HTTP for that batch, the summary line includes `fa
 Add this line to `~/.zshrc` or `~/.bashrc`:
 
 ```bash
-alias vault-bridge-docs='cd "$HOME/code/vault-bridge" && SERVER=http://127.0.0.1 TUNNEL_HOST=server-host TUNNEL_REMOTE_PORT=39090 LOCAL_ROOT="$HOME/Documents/vault-bridge" STATE_DIR="$HOME/Library/Application Support/vault-bridge" SYNC_MODE=auto RSYNC_SOURCE=server-host:/srv/vault-bridge/source/ RSYNC_BIN=/opt/homebrew/bin/rsync STREAM=1 ./scripts/run-macos-client.sh'
+alias kanon-docs='cd "$HOME/code/kanon" && SERVER=http://127.0.0.1 TUNNEL_HOST=server-host TUNNEL_REMOTE_PORT=39090 LOCAL_ROOT="$HOME/Documents/kanon" STATE_DIR="$HOME/Library/Application Support/kanon" SYNC_MODE=auto RSYNC_SOURCE=server-host:/root/docs/ RSYNC_BIN=/opt/homebrew/bin/rsync STREAM=1 ./scripts/run-kanon-client.sh'
 ```
 
 Reload shell config:
@@ -147,21 +147,21 @@ source ~/.zshrc
 Then run:
 
 ```bash
-vault-bridge-docs
+kanon-docs
 ```
 
 ## State and logs
 
 Client state directory:
 
-- `~/Library/Application Support/vault-bridge/cursor`
-- `~/Library/Application Support/vault-bridge/client.lock`
-- `~/Library/Application Support/vault-bridge/client.log`
+- `~/Library/Application Support/kanon/cursor`
+- `~/Library/Application Support/kanon/client.lock`
+- `~/Library/Application Support/kanon/client.log`
 
 Inspect logs:
 
 ```bash
-tail -f "$HOME/Library/Application Support/vault-bridge/client.log"
+tail -f "$HOME/Library/Application Support/kanon/client.log"
 ```
 
 ## Failure diagnosis
@@ -183,31 +183,31 @@ ssh server-host 'echo ok'
 3. if tunnel startup fails, force a known local port and test manually:
 
 ```bash
-cd "$HOME/code/vault-bridge"
-./bin/vault-bridge-client \
+cd "$HOME/code/kanon"
+./bin/kanon-client \
   -stream \
   -server http://127.0.0.1 \
   -tunnel-host server-host \
   -tunnel-remote-port 39090 \
   -tunnel-local-port 30081 \
-  -local-root "$HOME/Documents/vault-bridge" \
-  -state-dir "$HOME/Library/Application Support/vault-bridge" \
+  -local-root "$HOME/Documents/kanon" \
+  -state-dir "$HOME/Library/Application Support/kanon" \
   -sync-mode auto \
-  -rsync-source server-host:/srv/vault-bridge/source/ \
+  -rsync-source server-host:/root/docs/ \
   -rsync-bin /opt/homebrew/bin/rsync
 ```
 
 4. if `rsync` keeps failing, force HTTP mode to isolate transfer issues:
 
 ```bash
-cd "$HOME/code/vault-bridge"
-./bin/vault-bridge-client \
+cd "$HOME/code/kanon"
+./bin/kanon-client \
   -stream \
   -server http://127.0.0.1 \
   -tunnel-host server-host \
   -tunnel-remote-port 39090 \
-  -local-root "$HOME/Documents/vault-bridge" \
-  -state-dir "$HOME/Library/Application Support/vault-bridge" \
+  -local-root "$HOME/Documents/kanon" \
+  -state-dir "$HOME/Library/Application Support/kanon" \
   -sync-mode http
 ```
 

@@ -1,6 +1,6 @@
 //go:build linux
 
-package bridge
+package core
 
 import (
 	"context"
