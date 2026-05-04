@@ -1,9 +1,11 @@
 package main
 
 import (
+	"archive/tar"
 	"context"
 	"encoding/json"
 	"flag"
+	"io"
 	"log"
 	"net/http"
 	"os"
@@ -57,7 +59,7 @@ func main() {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
-	trigger := make(chan bridge.WatchChange, 16)
+	trigger := make(chan bridge.WatchChange, 4096)
 	watchState := newWatcherState()
 	go runWatcher(ctx, watcher, trigger, watchState)
 	go func() {
@@ -219,6 +221,26 @@ func main() {
 			}
 		}
 	})
+	mux.HandleFunc("/v1/archive", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost {
+			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
+		var req protocol.ArchiveRequest
+		if err := json.NewDecoder(io.LimitReader(r.Body, 4<<20)).Decode(&req); err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+		paths, err := cleanArchivePaths(req.Paths)
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+		w.Header().Set("Content-Type", "application/x-tar")
+		if err := writeArchive(w, *root, paths); err != nil {
+			log.Printf("archive error: %v", err)
+		}
+	})
 	mux.HandleFunc("/v1/file", func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodGet {
 			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
@@ -290,6 +312,63 @@ func parseDurationSeconds(r *http.Request, key string, fallback time.Duration) (
 func writeJSON(w http.ResponseWriter, value any) {
 	w.Header().Set("Content-Type", "application/json")
 	_ = json.NewEncoder(w).Encode(value)
+}
+
+func cleanArchivePaths(paths []string) ([]string, error) {
+	out := make([]string, 0, len(paths))
+	seen := make(map[string]struct{}, len(paths))
+	for _, raw := range paths {
+		rel, err := bridge.CleanRel(raw)
+		if err != nil {
+			return nil, err
+		}
+		if !bridge.IsTrackedFile(rel) {
+			return nil, os.ErrNotExist
+		}
+		if _, ok := seen[rel]; ok {
+			continue
+		}
+		seen[rel] = struct{}{}
+		out = append(out, rel)
+	}
+	return out, nil
+}
+
+func writeArchive(w io.Writer, root string, paths []string) error {
+	tw := tar.NewWriter(w)
+	defer tw.Close()
+	for _, rel := range paths {
+		abs := filepath.Join(root, filepath.FromSlash(rel))
+		info, err := os.Stat(abs)
+		if err != nil {
+			return err
+		}
+		if !info.Mode().IsRegular() {
+			return nil
+		}
+		h := &tar.Header{
+			Name:    rel,
+			Mode:    int64(info.Mode().Perm()),
+			Size:    info.Size(),
+			ModTime: info.ModTime(),
+		}
+		if err := tw.WriteHeader(h); err != nil {
+			return err
+		}
+		f, err := os.Open(abs)
+		if err != nil {
+			return err
+		}
+		_, copyErr := io.Copy(tw, f)
+		closeErr := f.Close()
+		if copyErr != nil {
+			return copyErr
+		}
+		if closeErr != nil {
+			return closeErr
+		}
+	}
+	return nil
 }
 
 type serverHealth struct {

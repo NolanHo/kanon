@@ -10,6 +10,10 @@ type SnapshotResponse struct {
 	Files   map[string]FileMeta `json:"files"`
 }
 
+type ArchiveRequest struct {
+	Paths []string `json:"paths"`
+}
+
 type Event struct {
 	Seq     int64  `json:"seq"`
 	TS      string `json:"ts"`

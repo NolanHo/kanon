@@ -1,6 +1,7 @@
 package main
 
 import (
+	"archive/tar"
 	"bufio"
 	"bytes"
 	"encoding/json"
@@ -38,6 +39,7 @@ type syncClient struct {
 	debounce         time.Duration
 	reconnect        time.Duration
 	verifyOnStart    bool
+	printPathLimit   int
 	syncMode         string
 	rsyncSource      string
 	rsyncBin         string
@@ -85,7 +87,8 @@ func main() {
 	debounce := flag.Duration("debounce", time.Second, "batch streamed events before one apply")
 	reconnect := flag.Duration("reconnect", 5*time.Second, "wait before reconnecting after a stream error")
 	verifyOnStart := flag.Bool("verify-on-start", true, "compare local mirror against server snapshot before syncing")
-	syncMode := flag.String("sync-mode", "auto", "transfer mode: auto, rsync, or http")
+	printPathLimit := flag.Int("print-path-limit", 50, "maximum changed paths printed per batch; negative prints all")
+	syncMode := flag.String("sync-mode", "auto", "transfer mode: auto, archive, rsync, or http")
 	rsyncSource := flag.String("rsync-source", "", "rsync source root, for example server-host:/srv/vault-bridge/source/")
 	rsyncBin := flag.String("rsync-bin", "/opt/homebrew/bin/rsync", "local rsync binary")
 	rsyncShell := flag.String("rsync-shell", "ssh", "remote shell for rsync when rsync-source is remote")
@@ -112,6 +115,7 @@ func main() {
 		*debounce,
 		*reconnect,
 		*verifyOnStart,
+		*printPathLimit,
 		*syncMode,
 		*rsyncSource,
 		*rsyncBin,
@@ -136,7 +140,7 @@ func main() {
 	}
 }
 
-func newSyncClient(server, localRoot, stateDir, logPath string, batchLimit int, stream bool, streamPoll, debounce, reconnect time.Duration, verifyOnStart bool, syncMode, rsyncSource, rsyncBin, rsyncShell, tunnelHost, tunnelRemoteHost string, tunnelRemotePort, tunnelLocalPort int, tunnelBin string) (*syncClient, error) {
+func newSyncClient(server, localRoot, stateDir, logPath string, batchLimit int, stream bool, streamPoll, debounce, reconnect time.Duration, verifyOnStart bool, printPathLimit int, syncMode, rsyncSource, rsyncBin, rsyncShell, tunnelHost, tunnelRemoteHost string, tunnelRemotePort, tunnelLocalPort int, tunnelBin string) (*syncClient, error) {
 	server = strings.TrimRight(server, "/")
 	parsed, err := url.Parse(server)
 	if err != nil {
@@ -158,7 +162,7 @@ func newSyncClient(server, localRoot, stateDir, logPath string, batchLimit int, 
 		return nil, err
 	}
 	syncMode = strings.ToLower(strings.TrimSpace(syncMode))
-	if syncMode != "auto" && syncMode != "rsync" && syncMode != "http" {
+	if syncMode != "auto" && syncMode != "archive" && syncMode != "rsync" && syncMode != "http" {
 		return nil, fmt.Errorf("invalid -sync-mode: %s", syncMode)
 	}
 
@@ -198,6 +202,7 @@ func newSyncClient(server, localRoot, stateDir, logPath string, batchLimit int, 
 		debounce:         debounce,
 		reconnect:        reconnect,
 		verifyOnStart:    verifyOnStart,
+		printPathLimit:   printPathLimit,
 		syncMode:         syncMode,
 		rsyncSource:      strings.TrimSpace(rsyncSource),
 		rsyncBin:         strings.TrimSpace(rsyncBin),
@@ -530,6 +535,16 @@ func (c *syncClient) scanLocal() (map[string]protocol.FileMeta, error) {
 			return err
 		}
 		if d.IsDir() {
+			if abs == c.localRoot {
+				return nil
+			}
+			rel, err := filepath.Rel(c.localRoot, abs)
+			if err != nil {
+				return err
+			}
+			if !bridge.IsWatchableDir(filepath.ToSlash(rel)) {
+				return filepath.SkipDir
+			}
 			return nil
 		}
 		info, err := d.Info()
@@ -627,6 +642,8 @@ func (c *syncClient) transferUpserts(paths []string) (string, string, error) {
 		return c.idleTransferMode(), "", nil
 	}
 	switch c.syncMode {
+	case "archive":
+		return "archive", "", c.transferArchive(paths)
 	case "http":
 		return "http", "", c.transferHTTP(paths)
 	case "rsync":
@@ -635,20 +652,20 @@ func (c *syncClient) transferUpserts(paths []string) (string, string, error) {
 		}
 		return "rsync", "", nil
 	case "auto":
+		if err := c.transferArchive(paths); err == nil {
+			return "archive", "", nil
+		}
+		fallbackReason := "archive failed"
 		if c.canUseRsync() {
 			if err := c.transferRsync(paths); err == nil {
-				return "rsync", "", nil
+				return "rsync", fallbackReason, nil
 			}
-			fallbackReason := "rsync failed"
-			if httpErr := c.transferHTTP(paths); httpErr != nil {
-				return "http", fallbackReason, fmt.Errorf("rsync failed and http fallback failed: %w", httpErr)
-			}
-			return "http", fallbackReason, nil
+			fallbackReason = "archive and rsync failed"
 		}
 		if err := c.transferHTTP(paths); err != nil {
-			return "http", "rsync unavailable", err
+			return "http", fallbackReason, err
 		}
-		return "http", "rsync unavailable", nil
+		return "http", fallbackReason, nil
 	default:
 		return "", "", fmt.Errorf("invalid sync mode: %s", c.syncMode)
 	}
@@ -666,10 +683,7 @@ func (c *syncClient) canUseRsync() bool {
 
 func (c *syncClient) idleTransferMode() string {
 	if c.syncMode == "auto" {
-		if c.canUseRsync() {
-			return "rsync"
-		}
-		return "http"
+		return "archive"
 	}
 	return c.syncMode
 }
@@ -734,6 +748,71 @@ func isRemoteRsyncSource(source string) bool {
 		return false
 	}
 	return !strings.Contains(source[:idx], "/")
+}
+
+func (c *syncClient) transferArchive(paths []string) error {
+	base, err := c.controlBase()
+	if err != nil {
+		return err
+	}
+	body, err := json.Marshal(protocol.ArchiveRequest{Paths: paths})
+	if err != nil {
+		return err
+	}
+	endpoint := fmt.Sprintf("%s/v1/archive", base)
+	resp, err := c.httpClient.Post(endpoint, "application/json", bytes.NewReader(body))
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
+		return fmt.Errorf("archive status=%d body=%s", resp.StatusCode, strings.TrimSpace(string(body)))
+	}
+	return c.unpackArchive(resp.Body)
+}
+
+func (c *syncClient) unpackArchive(r io.Reader) error {
+	tr := tar.NewReader(r)
+	for {
+		h, err := tr.Next()
+		if errors.Is(err, io.EOF) {
+			return nil
+		}
+		if err != nil {
+			return err
+		}
+		if h.Typeflag != tar.TypeReg && h.Typeflag != tar.TypeRegA {
+			continue
+		}
+		rel, err := bridge.CleanRel(h.Name)
+		if err != nil || !bridge.IsTrackedFile(rel) {
+			return fmt.Errorf("archive contains invalid path: %s", h.Name)
+		}
+		localPath := filepath.Join(c.localRoot, filepath.FromSlash(rel))
+		if err := os.MkdirAll(filepath.Dir(localPath), 0o755); err != nil {
+			return err
+		}
+		tmp := localPath + ".tmp"
+		file, err := os.Create(tmp)
+		if err != nil {
+			return err
+		}
+		_, copyErr := io.CopyN(file, tr, h.Size)
+		closeErr := file.Close()
+		if copyErr != nil {
+			_ = os.Remove(tmp)
+			return copyErr
+		}
+		if closeErr != nil {
+			_ = os.Remove(tmp)
+			return closeErr
+		}
+		if err := os.Rename(tmp, localPath); err != nil {
+			_ = os.Remove(tmp)
+			return err
+		}
+	}
 }
 
 func (c *syncClient) transferHTTP(paths []string) error {
@@ -848,11 +927,20 @@ func (c *syncClient) emitBatch(stats *batchStats) {
 		fallback = " fallback"
 	}
 	fmt.Printf("%s sync %s put=%d del=%d%s\n", stamp, stats.TransferMode, len(stats.UpsertedPaths), len(stats.DeletedPaths), fallback)
-	for _, rel := range stats.UpsertedPaths {
-		fmt.Printf("  PUT %s\n", rel)
+	c.printPaths("PUT", stats.UpsertedPaths)
+	c.printPaths("DEL", stats.DeletedPaths)
+}
+
+func (c *syncClient) printPaths(op string, paths []string) {
+	limit := len(paths)
+	if c.printPathLimit >= 0 && limit > c.printPathLimit {
+		limit = c.printPathLimit
 	}
-	for _, rel := range stats.DeletedPaths {
-		fmt.Printf("  DEL %s\n", rel)
+	for _, rel := range paths[:limit] {
+		fmt.Printf("  %s %s\n", op, rel)
+	}
+	if limit < len(paths) {
+		fmt.Printf("  ... %d more %s\n", len(paths)-limit, op)
 	}
 }
 
@@ -879,7 +967,7 @@ func (c *syncClient) describeDataPlane() string {
 		desc += " rsync=" + c.rsyncSource
 	}
 	if c.syncMode == "auto" {
-		desc += " fallback=http"
+		desc += " fallback=rsync,http"
 	}
 	return desc
 }
