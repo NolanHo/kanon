@@ -39,10 +39,13 @@ func main() {
 	if err != nil {
 		log.Fatal(err)
 	}
+	metrics := newServerMetrics()
+	initialStart := time.Now()
 	result, err := store.Reconcile()
 	if err != nil {
 		log.Fatal(err)
 	}
+	metrics.recordReconcile(true, result, time.Since(initialStart))
 	log.Printf("initial reconcile upserts=%d deletes=%d current_seq=%d", result.Upserts, result.Deletes, store.CurrentSeq())
 
 	watcher, err := bridge.NewWatcher(*root)
@@ -88,7 +91,8 @@ func main() {
 				case <-ctx.Done():
 					return
 				case change := <-trigger:
-					reconcileWatchChangesAndLog(store, drain(change))
+					metrics.recordWatchEvent()
+					reconcileWatchChangesAndLog(store, drain(change), metrics)
 				}
 				continue
 			}
@@ -96,9 +100,10 @@ func main() {
 			case <-ctx.Done():
 				return
 			case change := <-trigger:
-				reconcileWatchChangesAndLog(store, drain(change))
+				metrics.recordWatchEvent()
+				reconcileWatchChangesAndLog(store, drain(change), metrics)
 			case <-tickerC:
-				reconcileAndLog(store)
+				reconcileAndLog(store, metrics)
 			}
 		}
 	}()
@@ -110,15 +115,32 @@ func main() {
 			return
 		}
 		watchHealth := watchState.health()
+		m := metrics.health()
 		writeJSON(w, protocol.HealthResponse{
-			Status:             "ok",
-			ProtocolVersion:    protocol.CurrentVersion,
-			CurrentSeq:         store.CurrentSeq(),
-			WatcherRunning:     watchHealth.Running,
-			WatcherRestarts:    watchHealth.Restarts,
-			WatcherLastError:   watchHealth.LastError,
-			WatcherLastErrorTS: watchHealth.LastErrorTS,
+			Status:               "ok",
+			ProtocolVersion:      protocol.CurrentVersion,
+			CurrentSeq:           store.CurrentSeq(),
+			WatcherRunning:       watchHealth.Running,
+			WatcherRestarts:      watchHealth.Restarts,
+			WatcherLastError:     watchHealth.LastError,
+			WatcherLastErrorTS:   watchHealth.LastErrorTS,
+			LastReconcileTS:      m.LastReconcileTS,
+			LastReconcileFull:    m.LastReconcileFull,
+			LastReconcileMS:      m.LastReconcileMS,
+			LastReconcileUpserts: m.LastReconcileUpserts,
+			LastReconcileDeletes: m.LastReconcileDeletes,
+			LastWatchEventTS:     m.LastWatchEventTS,
+			TriggerQueueLen:      len(trigger),
+			TriggerQueueCap:      cap(trigger),
 		})
+	})
+	mux.HandleFunc("/v1/snapshot", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet {
+			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
+		current, files := store.Snapshot()
+		writeJSON(w, protocol.SnapshotResponse{Current: current, Files: files})
 	})
 	mux.HandleFunc("/v1/changes", func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodGet {
@@ -270,6 +292,46 @@ func writeJSON(w http.ResponseWriter, value any) {
 	_ = json.NewEncoder(w).Encode(value)
 }
 
+type serverHealth struct {
+	LastReconcileTS      string
+	LastReconcileFull    bool
+	LastReconcileMS      int64
+	LastReconcileUpserts int
+	LastReconcileDeletes int
+	LastWatchEventTS     string
+}
+
+type serverMetrics struct {
+	mu sync.RWMutex
+	h  serverHealth
+}
+
+func newServerMetrics() *serverMetrics {
+	return &serverMetrics{}
+}
+
+func (m *serverMetrics) health() serverHealth {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	return m.h
+}
+
+func (m *serverMetrics) recordReconcile(full bool, result bridge.ReconcileResult, d time.Duration) {
+	m.mu.Lock()
+	m.h.LastReconcileTS = time.Now().UTC().Format(time.RFC3339)
+	m.h.LastReconcileFull = full
+	m.h.LastReconcileMS = d.Milliseconds()
+	m.h.LastReconcileUpserts = result.Upserts
+	m.h.LastReconcileDeletes = result.Deletes
+	m.mu.Unlock()
+}
+
+func (m *serverMetrics) recordWatchEvent() {
+	m.mu.Lock()
+	m.h.LastWatchEventTS = time.Now().UTC().Format(time.RFC3339)
+	m.mu.Unlock()
+}
+
 type watcherHealth struct {
 	Running     bool
 	Restarts    int64
@@ -342,20 +404,26 @@ func sendWatchChange(ctx context.Context, ch chan<- bridge.WatchChange, change b
 	}
 }
 
-func reconcileAndLog(store *bridge.Store) {
+func reconcileAndLog(store *bridge.Store, metrics *serverMetrics) {
+	start := time.Now()
 	result, err := store.Reconcile()
+	d := time.Since(start)
 	if err != nil {
 		log.Printf("reconcile error: %v", err)
 		return
 	}
+	metrics.recordReconcile(true, result, d)
 	if result.Upserts > 0 || result.Deletes > 0 {
-		log.Printf("reconcile upserts=%d deletes=%d current_seq=%d", result.Upserts, result.Deletes, store.CurrentSeq())
+		log.Printf("reconcile upserts=%d deletes=%d duration_ms=%d current_seq=%d", result.Upserts, result.Deletes, d.Milliseconds(), store.CurrentSeq())
 	}
 }
 
-func reconcileWatchChangesAndLog(store *bridge.Store, changes []bridge.WatchChange) {
+func reconcileWatchChangesAndLog(store *bridge.Store, changes []bridge.WatchChange, metrics *serverMetrics) {
+	start := time.Now()
 	result := bridge.ReconcileResult{}
+	full := false
 	for _, change := range changes {
+		full = full || change.Full || change.Path == ""
 		part, err := store.ReconcileWatchChange(change)
 		if err != nil {
 			log.Printf("watch reconcile error path=%s full=%t: %v", change.Path, change.Full, err)
@@ -364,8 +432,10 @@ func reconcileWatchChangesAndLog(store *bridge.Store, changes []bridge.WatchChan
 		result.Upserts += part.Upserts
 		result.Deletes += part.Deletes
 	}
+	d := time.Since(start)
+	metrics.recordReconcile(full, result, d)
 	if result.Upserts > 0 || result.Deletes > 0 {
-		log.Printf("watch reconcile changes=%d upserts=%d deletes=%d current_seq=%d", len(changes), result.Upserts, result.Deletes, store.CurrentSeq())
+		log.Printf("watch reconcile changes=%d upserts=%d deletes=%d duration_ms=%d current_seq=%d", len(changes), result.Upserts, result.Deletes, d.Milliseconds(), store.CurrentSeq())
 	}
 }
 

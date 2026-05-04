@@ -19,6 +19,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/NolanHo/vault-bridge/internal/bridge"
 	"github.com/NolanHo/vault-bridge/internal/protocol"
 	"github.com/NolanHo/vault-bridge/internal/version"
 )
@@ -36,6 +37,7 @@ type syncClient struct {
 	streamPoll       time.Duration
 	debounce         time.Duration
 	reconnect        time.Duration
+	verifyOnStart    bool
 	syncMode         string
 	rsyncSource      string
 	rsyncBin         string
@@ -82,6 +84,7 @@ func main() {
 	streamPoll := flag.Duration("stream-poll-interval", 0, "server idle wait in stream mode; 0 keeps the stream blocked until new changes arrive")
 	debounce := flag.Duration("debounce", time.Second, "batch streamed events before one apply")
 	reconnect := flag.Duration("reconnect", 5*time.Second, "wait before reconnecting after a stream error")
+	verifyOnStart := flag.Bool("verify-on-start", true, "compare local mirror against server snapshot before syncing")
 	syncMode := flag.String("sync-mode", "auto", "transfer mode: auto, rsync, or http")
 	rsyncSource := flag.String("rsync-source", "", "rsync source root, for example server-host:/srv/vault-bridge/source/")
 	rsyncBin := flag.String("rsync-bin", "/opt/homebrew/bin/rsync", "local rsync binary")
@@ -108,6 +111,7 @@ func main() {
 		*streamPoll,
 		*debounce,
 		*reconnect,
+		*verifyOnStart,
 		*syncMode,
 		*rsyncSource,
 		*rsyncBin,
@@ -132,7 +136,7 @@ func main() {
 	}
 }
 
-func newSyncClient(server, localRoot, stateDir, logPath string, batchLimit int, stream bool, streamPoll, debounce, reconnect time.Duration, syncMode, rsyncSource, rsyncBin, rsyncShell, tunnelHost, tunnelRemoteHost string, tunnelRemotePort, tunnelLocalPort int, tunnelBin string) (*syncClient, error) {
+func newSyncClient(server, localRoot, stateDir, logPath string, batchLimit int, stream bool, streamPoll, debounce, reconnect time.Duration, verifyOnStart bool, syncMode, rsyncSource, rsyncBin, rsyncShell, tunnelHost, tunnelRemoteHost string, tunnelRemotePort, tunnelLocalPort int, tunnelBin string) (*syncClient, error) {
 	server = strings.TrimRight(server, "/")
 	parsed, err := url.Parse(server)
 	if err != nil {
@@ -193,6 +197,7 @@ func newSyncClient(server, localRoot, stateDir, logPath string, batchLimit int, 
 		streamPoll:       streamPoll,
 		debounce:         debounce,
 		reconnect:        reconnect,
+		verifyOnStart:    verifyOnStart,
 		syncMode:         syncMode,
 		rsyncSource:      strings.TrimSpace(rsyncSource),
 		rsyncBin:         strings.TrimSpace(rsyncBin),
@@ -227,6 +232,14 @@ func (c *syncClient) run() (*batchStats, int) {
 	if err := syscall.Flock(int(lock.Fd()), syscall.LOCK_EX|syscall.LOCK_NB); err != nil {
 		fmt.Fprintln(os.Stderr, "another sync is already running")
 		return nil, 1
+	}
+
+	if c.verifyOnStart {
+		if err := c.verifySnapshot(); err != nil {
+			c.recordError(err.Error(), map[string]any{"mode": "verify"})
+			fmt.Fprintln(os.Stderr, err)
+			return nil, 1
+		}
 	}
 
 	if c.stream {
@@ -398,6 +411,28 @@ func (c *syncClient) consumeStream(cursor int64) error {
 	}
 }
 
+func (c *syncClient) fetchSnapshot() (*protocol.SnapshotResponse, error) {
+	base, err := c.controlBase()
+	if err != nil {
+		return nil, err
+	}
+	endpoint := fmt.Sprintf("%s/v1/snapshot", base)
+	resp, err := c.httpClient.Get(endpoint)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
+		return nil, fmt.Errorf("snapshot status=%d body=%s", resp.StatusCode, strings.TrimSpace(string(body)))
+	}
+	var payload protocol.SnapshotResponse
+	if err := json.NewDecoder(resp.Body).Decode(&payload); err != nil {
+		return nil, err
+	}
+	return &payload, nil
+}
+
 func (c *syncClient) fetchChanges(cursor int64) (*protocol.ChangesResponse, error) {
 	base, err := c.controlBase()
 	if err != nil {
@@ -420,6 +455,106 @@ func (c *syncClient) fetchChanges(cursor int64) (*protocol.ChangesResponse, erro
 	return &payload, nil
 }
 
+func (c *syncClient) verifySnapshot() error {
+	snapshot, err := c.fetchSnapshot()
+	if err != nil {
+		return err
+	}
+	deletes, upserts, err := c.diffSnapshot(snapshot.Files)
+	if err != nil {
+		return err
+	}
+	if len(deletes) > 0 {
+		if _, err := c.applyDeletes(deletes); err != nil {
+			return err
+		}
+	}
+	transferMode, fallbackReason, err := c.transferUpserts(upserts)
+	if err != nil {
+		return err
+	}
+	if err := c.verifyLocalFiles(snapshot.Files, upserts); err != nil {
+		return err
+	}
+	if err := c.writeCursor(snapshot.Current); err != nil {
+		return err
+	}
+	if len(deletes) > 0 || len(upserts) > 0 {
+		stats := &batchStats{
+			Mode:           "verify",
+			Cursor:         snapshot.Current,
+			Deleted:        len(deletes),
+			Upserted:       len(upserts),
+			DeletedPaths:   deletes,
+			UpsertedPaths:  upserts,
+			TransferMode:   transferMode,
+			FallbackReason: fallbackReason,
+		}
+		c.emitBatch(stats)
+		c.recordOK(stats)
+	}
+	return nil
+}
+
+func (c *syncClient) diffSnapshot(snapshot map[string]protocol.FileMeta) ([]string, []string, error) {
+	local, err := c.scanLocal()
+	if err != nil {
+		return nil, nil, err
+	}
+	deletes := make([]string, 0)
+	upserts := make([]string, 0)
+	for rel, meta := range local {
+		remote, ok := snapshot[rel]
+		if !ok {
+			deletes = append(deletes, rel)
+			continue
+		}
+		if remote.Size != meta.Size {
+			upserts = append(upserts, rel)
+		}
+	}
+	for rel := range snapshot {
+		if _, ok := local[rel]; !ok {
+			upserts = append(upserts, rel)
+		}
+	}
+	sort.Strings(deletes)
+	sort.Strings(upserts)
+	return deletes, upserts, nil
+}
+
+func (c *syncClient) scanLocal() (map[string]protocol.FileMeta, error) {
+	out := make(map[string]protocol.FileMeta)
+	if err := filepath.WalkDir(c.localRoot, func(abs string, d os.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		if d.IsDir() {
+			return nil
+		}
+		info, err := d.Info()
+		if err != nil {
+			return err
+		}
+		if !info.Mode().IsRegular() {
+			return nil
+		}
+		rel, err := filepath.Rel(c.localRoot, abs)
+		if err != nil {
+			return err
+		}
+		rel = filepath.ToSlash(rel)
+		if !bridge.IsTrackedFile(rel) {
+			return nil
+		}
+		out[rel] = protocol.FileMeta{MtimeNS: info.ModTime().UnixNano(), Size: info.Size()}
+		return nil
+	}); err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
 func (c *syncClient) applyEvents(mode string, events []protocol.Event) (*batchStats, error) {
 	start := time.Now()
 	deletes, upserts, cursor := coalesce(events)
@@ -429,6 +564,9 @@ func (c *syncClient) applyEvents(mode string, events []protocol.Event) (*batchSt
 	}
 	transferMode, fallbackReason, err := c.transferUpserts(upserts)
 	if err != nil {
+		return nil, err
+	}
+	if err := c.verifyEventUpserts(events, upserts); err != nil {
 		return nil, err
 	}
 	if err := c.writeCursor(cursor); err != nil {
@@ -450,6 +588,38 @@ func (c *syncClient) applyEvents(mode string, events []protocol.Event) (*batchSt
 		c.recordOK(stats)
 	}
 	return stats, nil
+}
+
+func (c *syncClient) verifyEventUpserts(events []protocol.Event, upserts []string) error {
+	meta := make(map[string]protocol.FileMeta, len(events))
+	for _, event := range events {
+		if event.Kind != "upsert" || event.MtimeNS == nil || event.Size == nil {
+			continue
+		}
+		meta[event.Path] = protocol.FileMeta{MtimeNS: *event.MtimeNS, Size: *event.Size}
+	}
+	return c.verifyLocalFiles(meta, upserts)
+}
+
+func (c *syncClient) verifyLocalFiles(meta map[string]protocol.FileMeta, paths []string) error {
+	for _, rel := range paths {
+		expected, ok := meta[rel]
+		if !ok {
+			continue
+		}
+		localPath := filepath.Join(c.localRoot, filepath.FromSlash(rel))
+		info, err := os.Stat(localPath)
+		if err != nil {
+			return fmt.Errorf("verify %s: %w", rel, err)
+		}
+		if !info.Mode().IsRegular() {
+			return fmt.Errorf("verify %s: not a regular file", rel)
+		}
+		if info.Size() != expected.Size {
+			return fmt.Errorf("verify %s: got size=%d want size=%d", rel, info.Size(), expected.Size)
+		}
+	}
+	return nil
 }
 
 func (c *syncClient) transferUpserts(paths []string) (string, string, error) {
@@ -541,6 +711,7 @@ func (c *syncClient) transferRsync(paths []string) error {
 		"--from0",
 		"--files-from=" + tmpPath,
 		"--omit-dir-times",
+		"--times",
 	}
 	if isRemoteRsyncSource(source) && c.rsyncShell != "" {
 		args = append(args, "-e", c.rsyncShell)

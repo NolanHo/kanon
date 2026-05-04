@@ -150,6 +150,16 @@ func (s *Store) CurrentSeq() int64 {
 	return s.currentSeq
 }
 
+func (s *Store) Snapshot() (int64, map[string]protocol.FileMeta) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	out := make(map[string]protocol.FileMeta, len(s.snapshot))
+	for rel, meta := range s.snapshot {
+		out[rel] = meta
+	}
+	return s.currentSeq, out
+}
+
 func (s *Store) EventRows(since int64, limit int) ([]protocol.Event, bool) {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
