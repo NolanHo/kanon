@@ -31,6 +31,7 @@ func main() {
 	reconcileInterval := flag.Duration("reconcile-interval", time.Hour, "full reconcile interval")
 	watchDebounce := flag.Duration("watch-debounce", 200*time.Millisecond, "delay before reconciling after watcher activity")
 	indexPath := flag.String("index-path", "", "SQLite index path; defaults to <state-dir>/index.sqlite")
+	queryLogPath := flag.String("query-log", "", "JSONL query log path; defaults to <state-dir>/queries.jsonl")
 	flag.Parse()
 
 	cfg, err := core.LoadFilterConfig(*filterConfig)
@@ -65,6 +66,15 @@ func main() {
 		log.Fatal(err)
 	}
 	defer idx.Close()
+	qlPath := *queryLogPath
+	if strings.TrimSpace(qlPath) == "" {
+		qlPath = filepath.Join(*stateDir, "queries.jsonl")
+	}
+	queryLog, err := openQueryLog(qlPath)
+	if err != nil {
+		log.Fatal(err)
+	}
+	defer queryLog.Close()
 	currentSeq, files := store.Snapshot()
 	if err := idx.Bootstrap(ctx, currentSeq, files); err != nil {
 		log.Fatal(err)
@@ -178,11 +188,14 @@ func main() {
 			http.Error(w, err.Error(), http.StatusBadRequest)
 			return
 		}
+		started := time.Now()
 		resp, err := idx.Query(r.Context(), req, store.CurrentSeq())
 		if err != nil {
+			queryLog.Record(queryLogEntryFromRequest(r, req, nil, time.Since(started), err))
 			http.Error(w, err.Error(), http.StatusInternalServerError)
 			return
 		}
+		queryLog.Record(queryLogEntryFromRequest(r, req, &resp, time.Since(started), nil))
 		writeJSON(w, resp)
 	})
 	mux.HandleFunc("/v1/snapshot", func(w http.ResponseWriter, r *http.Request) {
@@ -316,7 +329,7 @@ func main() {
 		_ = server.Shutdown(shutdownCtx)
 	}()
 
-	log.Printf("kanon-server version=%s commit=%s addr=%s root=%s state_dir=%s filter_config=%s", version.Version, version.Commit, *addr, *root, *stateDir, *filterConfig)
+	log.Printf("kanon-server version=%s commit=%s addr=%s root=%s state_dir=%s filter_config=%s query_log=%s", version.Version, version.Commit, *addr, *root, *stateDir, *filterConfig, qlPath)
 	if err := server.ListenAndServe(); err != nil && err != http.ErrServerClosed {
 		log.Fatal(err)
 	}
@@ -596,6 +609,113 @@ func compactWatchChanges(changes []core.WatchChange) []core.WatchChange {
 	}
 	for _, change := range files {
 		out = append(out, change)
+	}
+	return out
+}
+
+type queryLog struct {
+	mu   sync.Mutex
+	file *os.File
+}
+
+type queryLogEntry struct {
+	At            string              `json:"at"`
+	RemoteAddr    string              `json:"remote_addr,omitempty"`
+	UserAgent     string              `json:"user_agent,omitempty"`
+	Query         string              `json:"query"`
+	Limit         int                 `json:"limit"`
+	PathPrefix    string              `json:"pathPrefix,omitempty"`
+	Kind          string              `json:"kind,omitempty"`
+	DurationMS    int64               `json:"duration_ms"`
+	Error         string              `json:"error,omitempty"`
+	IndexCurrent  int64               `json:"index_current_seq,omitempty"`
+	IndexIndexed  int64               `json:"index_indexed_seq,omitempty"`
+	IndexLag      int64               `json:"index_lag,omitempty"`
+	MatchCount    int                 `json:"match_count"`
+	ResultPaths   []string            `json:"result_paths,omitempty"`
+	ResultScores  []float64           `json:"result_scores,omitempty"`
+	ResultMatched [][]string          `json:"result_matched,omitempty"`
+	Headers       map[string][]string `json:"headers,omitempty"`
+}
+
+func openQueryLog(path string) (*queryLog, error) {
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		return nil, err
+	}
+	file, err := os.OpenFile(path, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o644)
+	if err != nil {
+		return nil, err
+	}
+	return &queryLog{file: file}, nil
+}
+
+func (ql *queryLog) Close() error {
+	if ql == nil || ql.file == nil {
+		return nil
+	}
+	return ql.file.Close()
+}
+
+func (ql *queryLog) Record(entry queryLogEntry) {
+	if ql == nil || ql.file == nil {
+		return
+	}
+	data, err := json.Marshal(entry)
+	if err != nil {
+		log.Printf("query log encode error: %v", err)
+		return
+	}
+	ql.mu.Lock()
+	defer ql.mu.Unlock()
+	if _, err := ql.file.Write(append(data, '\n')); err != nil {
+		log.Printf("query log write error: %v", err)
+	}
+}
+
+func queryLogEntryFromRequest(r *http.Request, req index.QueryRequest, resp *index.QueryResponse, duration time.Duration, queryErr error) queryLogEntry {
+	entry := queryLogEntry{
+		At:         time.Now().UTC().Format(time.RFC3339Nano),
+		RemoteAddr: r.RemoteAddr,
+		UserAgent:  r.UserAgent(),
+		Query:      req.Query,
+		Limit:      req.Limit,
+		PathPrefix: req.PathPrefix,
+		Kind:       req.Kind,
+		DurationMS: duration.Milliseconds(),
+		Headers:    queryLogHeaders(r),
+	}
+	if queryErr != nil {
+		entry.Error = queryErr.Error()
+	}
+	if resp != nil {
+		entry.Limit = resp.Limit
+		entry.IndexCurrent = resp.Index.CurrentSeq
+		entry.IndexIndexed = resp.Index.IndexedSeq
+		entry.IndexLag = resp.Index.Lag
+		entry.MatchCount = len(resp.Matches)
+		limit := len(resp.Matches)
+		if limit > 10 {
+			limit = 10
+		}
+		for _, match := range resp.Matches[:limit] {
+			entry.ResultPaths = append(entry.ResultPaths, match.Path)
+			entry.ResultScores = append(entry.ResultScores, match.Score)
+			entry.ResultMatched = append(entry.ResultMatched, match.Matched)
+		}
+	}
+	return entry
+}
+
+func queryLogHeaders(r *http.Request) map[string][]string {
+	out := map[string][]string{}
+	for _, key := range []string{"X-Forwarded-For", "X-Request-Id", "X-Pi-Session", "X-Pi-Tool"} {
+		values := r.Header.Values(key)
+		if len(values) > 0 {
+			out[key] = values
+		}
+	}
+	if len(out) == 0 {
+		return nil
 	}
 	return out
 }
