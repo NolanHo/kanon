@@ -10,6 +10,8 @@
 
 [Chinese](./README_zh.md) · [macOS foreground guide](./docs/macos-foreground-client-guide.md) · [Linux supervisord deploy guide](./docs/linux-supervisord-deploy-guide.md)
 
+<img src="./docs/assets/kanon.png" alt="Kanon brand image" width="760">
+
 </div>
 
 ---
@@ -30,8 +32,7 @@ Kanon optimizes for path discovery:
 
 ## How it works
 
-<img src="./assets/kanon-architecture-overview.svg" alt="Kanon architecture overview" width="760">
-
+<img src="./docs/assets/kanon-architecture.png" alt="Kanon architecture overview" width="760">
 
 ## Components
 
