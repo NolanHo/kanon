@@ -425,7 +425,7 @@ func (idx *Index) Query(ctx context.Context, req QueryRequest, currentSeq int64)
 		args = append(args, req.Kind)
 	}
 	args = append(args, limit)
-	query := fmt.Sprintf(`select d.path, coalesce(d.title, ''), d.headings_json, d.kind, substr(documents_fts.body, 1, 240), bm25(documents_fts, 6.0, 4.0, 2.0, 1.0) as rank
+	query := fmt.Sprintf(`select d.path, coalesce(d.title, ''), d.headings_json, d.kind, substr(documents_fts.body, 1, 80), bm25(documents_fts, 6.0, 4.0, 2.0, 1.0) as rank
 		from documents_fts join documents d on d.id = documents_fts.rowid
 		where %s
 		order by rank asc, d.path asc
