@@ -18,6 +18,7 @@ import (
 	"time"
 
 	"github.com/NolanHo/kanon/internal/core"
+	"github.com/NolanHo/kanon/internal/index"
 	"github.com/NolanHo/kanon/internal/protocol"
 	"github.com/NolanHo/kanon/internal/version"
 )
@@ -29,6 +30,7 @@ func main() {
 	filterConfig := flag.String("filter-config", "", "optional filter config file")
 	reconcileInterval := flag.Duration("reconcile-interval", time.Hour, "full reconcile interval")
 	watchDebounce := flag.Duration("watch-debounce", 200*time.Millisecond, "delay before reconciling after watcher activity")
+	indexPath := flag.String("index-path", "", "SQLite index path; defaults to <state-dir>/index.sqlite")
 	flag.Parse()
 
 	cfg, err := core.LoadFilterConfig(*filterConfig)
@@ -41,6 +43,10 @@ func main() {
 	if err != nil {
 		log.Fatal(err)
 	}
+
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
+
 	metrics := newServerMetrics()
 	initialStart := time.Now()
 	result, err := store.Reconcile()
@@ -50,14 +56,27 @@ func main() {
 	metrics.recordReconcile(true, result, time.Since(initialStart))
 	log.Printf("initial reconcile upserts=%d deletes=%d current_seq=%d", result.Upserts, result.Deletes, store.CurrentSeq())
 
+	dbPath := *indexPath
+	if strings.TrimSpace(dbPath) == "" {
+		dbPath = filepath.Join(*stateDir, "index.sqlite")
+	}
+	idx, err := index.Open(*root, dbPath)
+	if err != nil {
+		log.Fatal(err)
+	}
+	defer idx.Close()
+	currentSeq, files := store.Snapshot()
+	if err := idx.Bootstrap(ctx, currentSeq, files); err != nil {
+		log.Fatal(err)
+	}
+	go idx.Run(ctx, store)
+	log.Printf("index path=%s current_seq=%d files=%d", dbPath, currentSeq, len(files))
+
 	watcher, err := core.NewWatcher(*root)
 	if err != nil {
 		log.Fatal(err)
 	}
 	defer watcher.Close()
-
-	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
-	defer stop()
 
 	trigger := make(chan core.WatchChange, 4096)
 	watchState := newWatcherState()
@@ -135,6 +154,36 @@ func main() {
 			TriggerQueueLen:      len(trigger),
 			TriggerQueueCap:      cap(trigger),
 		})
+	})
+	mux.HandleFunc("/v1/index/health", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet {
+			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
+		health, err := idx.Health(r.Context(), store.CurrentSeq())
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
+		writeJSON(w, health)
+	})
+	mux.HandleFunc("/v1/query", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost {
+			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
+		defer r.Body.Close()
+		var req index.QueryRequest
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+		resp, err := idx.Query(r.Context(), req, store.CurrentSeq())
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
+		writeJSON(w, resp)
 	})
 	mux.HandleFunc("/v1/snapshot", func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodGet {
