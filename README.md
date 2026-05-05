@@ -2,7 +2,7 @@
 
 # Kanon
 
-> Path-first search and local mirroring for `/root/docs`.
+> Path-first search and local mirroring for a docs workspace.
 
 [![Go](https://img.shields.io/badge/Go-1.22+-00ADD8.svg)](https://go.dev/)
 [![Platform](https://img.shields.io/badge/Platform-Linux%20server%20%2B%20macOS%20client-333333.svg)](#)
@@ -14,9 +14,9 @@
 
 ---
 
-Kanon is the location layer for `/root/docs`.
+Kanon is the location layer for a docs workspace.
 
-It watches the authoritative Linux docs tree, maintains an incremental journal, builds a SQLite FTS index, answers query requests with document paths, and mirrors changed files to local reading directories. It does not generate answers and does not govern how docs should be written.
+It watches an authoritative Linux docs tree, maintains an incremental journal, builds a SQLite FTS index, answers query requests with document paths, and mirrors changed files to local reading directories. It does not generate answers and does not govern how docs should be written.
 
 ## Design stance
 
@@ -26,26 +26,18 @@ Kanon optimizes for path discovery:
 - rank path, filename, title, and heading signals above body text
 - keep mirror sync as a first-class capability for human reading workflows
 - record query logs so retrieval behavior can be evaluated from real callers
-- keep the live index outside `/root/docs` so indexing does not trigger the watcher
+- keep the live index outside the watched tree so indexing does not trigger the watcher
 
 ## How it works
 
-```mermaid
-flowchart LR
-    A[/root/docs on Linux] --> B[kanon-server]
-    B --> C[Snapshot and change journal]
-    B --> D[SQLite FTS index]
-    E[Query clients] -->|POST /v1/query| D
-    F[kanon-client on macOS] -->|SSH tunnel for control plane| B
-    F -->|rsync or HTTP archive| A
-    F --> G[Local reading mirror]
-```
+<img src="./assets/kanon-architecture-overview.svg" alt="Kanon architecture overview" width="760">
+
 
 ## Components
 
 | Component | Role |
 | --- | --- |
-| `kanon-server` | Watches `/root/docs`, stores a file snapshot and event journal, builds the index, serves HTTP APIs |
+| `kanon-server` | Watches a docs tree, stores a file snapshot and event journal, builds the index, serves HTTP APIs |
 | `kanon-client` | Mirrors changed files to a local directory and keeps a persistent cursor |
 | `kanon-bench` | Runs path-recall and ranking benchmarks against a live Kanon server |
 | SQLite FTS | Live lexical index with Chinese token expansion and deterministic path-first reranking |
@@ -88,7 +80,7 @@ go build -o bin/kanon-bench ./cmd/kanon-bench
 ```bash
 ./bin/kanon-server \
   -addr :39090 \
-  -root /root/docs \
+  -root /path/to/docs \
   -state-dir "$HOME/.local/state/kanon/server" \
   -filter-config ./config/filter.json
 ```
@@ -108,12 +100,12 @@ Important server files:
 ./bin/kanon-client \
   -stream \
   -server http://127.0.0.1 \
-  -tunnel-host server-host \
+  -tunnel-host ssh-alias \
   -tunnel-remote-port 39090 \
-  -local-root "$HOME/Documents/kanon" \
+  -local-root "$HOME/Documents/docs-mirror" \
   -state-dir "$HOME/Library/Application Support/kanon" \
   -sync-mode auto \
-  -rsync-source server-host:/root/docs/ \
+  -rsync-source ssh-alias:/path/to/docs/ \
   -rsync-bin /opt/homebrew/bin/rsync
 ```
 

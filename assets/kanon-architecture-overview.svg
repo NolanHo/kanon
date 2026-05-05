@@ -1,0 +1,56 @@
+<svg width="1536" height="1024" viewBox="0 0 1536 1024" fill="none" xmlns="http://www.w3.org/2000/svg">
+  <rect width="1536" height="1024" rx="36" fill="#F8FAFC"/>
+  <defs>
+    <filter id="shadow" x="-20%" y="-20%" width="140%" height="140%">
+      <feDropShadow dx="0" dy="12" stdDeviation="18" flood-color="#0F172A" flood-opacity="0.10"/>
+    </filter>
+    <marker id="arrow" markerWidth="16" markerHeight="16" refX="13" refY="8" orient="auto" markerUnits="strokeWidth">
+      <path d="M2 2L14 8L2 14" fill="none" stroke="#334155" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
+    </marker>
+    <style>
+      .box { fill:#FFFFFF; stroke:#CBD5E1; stroke-width:2; filter:url(#shadow); }
+      .focus { fill:#FFF7ED; stroke:#F97316; stroke-width:3; filter:url(#shadow); }
+      .store { fill:#EEF2FF; stroke:#6366F1; stroke-width:2; filter:url(#shadow); }
+      .label { font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; font-size:30px; font-weight:700; fill:#0F172A; text-anchor:middle; dominant-baseline:middle; }
+      .small { font-size:24px; font-weight:650; }
+      .arrow { stroke:#334155; stroke-width:4; stroke-linecap:round; stroke-linejoin:round; marker-end:url(#arrow); }
+    </style>
+  </defs>
+
+  <text x="768" y="96" class="label" style="font-size:42px">Kanon</text>
+
+  <rect x="72" y="372" width="250" height="136" rx="24" class="box"/>
+  <text x="197" y="424" class="label small">Authoritative</text>
+  <text x="197" y="462" class="label small">docs tree</text>
+
+  <rect x="478" y="346" width="260" height="188" rx="28" class="focus"/>
+  <text x="608" y="440" class="label">Kanon server</text>
+
+  <rect x="900" y="236" width="260" height="136" rx="24" class="store"/>
+  <text x="1030" y="288" class="label small">Change</text>
+  <text x="1030" y="326" class="label small">journal</text>
+
+  <rect x="900" y="508" width="260" height="136" rx="24" class="store"/>
+  <text x="1030" y="560" class="label small">SQLite FTS</text>
+  <text x="1030" y="598" class="label small">index</text>
+
+  <rect x="1232" y="508" width="232" height="136" rx="24" class="box"/>
+  <text x="1348" y="560" class="label small">Query</text>
+  <text x="1348" y="598" class="label small">clients</text>
+
+  <rect x="900" y="736" width="260" height="136" rx="24" class="box"/>
+  <text x="1030" y="788" class="label small">Mirror</text>
+  <text x="1030" y="826" class="label small">client</text>
+
+  <rect x="1232" y="736" width="232" height="136" rx="24" class="box"/>
+  <text x="1348" y="788" class="label small">Local reading</text>
+  <text x="1348" y="826" class="label small">mirror</text>
+
+  <path class="arrow" d="M322 440H462"/>
+  <path class="arrow" d="M738 392C805 350 826 304 884 304"/>
+  <path class="arrow" d="M738 488C805 530 826 576 884 576"/>
+  <path class="arrow" d="M1232 576H1178"/>
+  <path class="arrow" d="M1030 736V660C1030 610 1060 576 884 576"/>
+  <path class="arrow" d="M1160 804H1216"/>
+  <path class="arrow" d="M900 804C760 804 680 548 646 540"/>
+</svg>

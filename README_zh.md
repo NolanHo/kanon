@@ -2,7 +2,7 @@
 
 # Kanon
 
-> 面向 `/root/docs` 的路径优先搜索和本地镜像。
+> 面向 docs workspace 的路径优先搜索和本地镜像。
 
 [![Go](https://img.shields.io/badge/Go-1.22+-00ADD8.svg)](https://go.dev/)
 [![Platform](https://img.shields.io/badge/Platform-Linux%20server%20%2B%20macOS%20client-333333.svg)](#)
@@ -14,7 +14,7 @@
 
 ---
 
-Kanon 是 `/root/docs` 的位置层。
+Kanon 是 docs workspace 的位置层。
 
 它监听 Linux 上的权威 docs 树，维护增量日志，构建 SQLite FTS 索引，查询时返回文档路径，并把变更文件同步到本地阅读目录。它不生成答案，也不规定 docs 应该如何书写。
 
@@ -26,26 +26,18 @@ Kanon 优化的是路径发现：
 - path、filename、title、heading 信号高于 body 文本
 - 本地镜像是人类阅读工作流的核心能力
 - 记录 query log，用真实调用分析检索行为
-- live index 放在 `/root/docs` 外，避免索引写入触发 watcher
+- live index 放在被监听目录外，避免索引写入触发 watcher
 
 ## 工作方式
 
-```mermaid
-flowchart LR
-    A[Linux 上的 /root/docs] --> B[kanon-server]
-    B --> C[快照和变更日志]
-    B --> D[SQLite FTS 索引]
-    E[查询客户端] -->|POST /v1/query| D
-    F[macOS 上的 kanon-client] -->|SSH tunnel 访问 control plane| B
-    F -->|rsync 或 HTTP archive| A
-    F --> G[本地阅读镜像]
-```
+<img src="./assets/kanon-architecture-overview.svg" alt="Kanon architecture overview" width="760">
+
 
 ## 组件
 
 | 组件 | 作用 |
 | --- | --- |
-| `kanon-server` | 监听 `/root/docs`，维护文件快照和事件日志，构建索引，提供 HTTP API |
+| `kanon-server` | 监听 docs 树，维护文件快照和事件日志，构建索引，提供 HTTP API |
 | `kanon-client` | 同步变更文件到本地目录，并维护持久化 cursor |
 | `kanon-bench` | 针对 live Kanon server 跑路径召回和排序 benchmark |
 | SQLite FTS | live 词法索引，包含中文 token expansion 和确定性的路径优先重排 |
@@ -88,7 +80,7 @@ go build -o bin/kanon-bench ./cmd/kanon-bench
 ```bash
 ./bin/kanon-server \
   -addr :39090 \
-  -root /root/docs \
+  -root /path/to/docs \
   -state-dir "$HOME/.local/state/kanon/server" \
   -filter-config ./config/filter.json
 ```
@@ -108,12 +100,12 @@ go build -o bin/kanon-bench ./cmd/kanon-bench
 ./bin/kanon-client \
   -stream \
   -server http://127.0.0.1 \
-  -tunnel-host server-host \
+  -tunnel-host ssh-alias \
   -tunnel-remote-port 39090 \
-  -local-root "$HOME/Documents/kanon" \
+  -local-root "$HOME/Documents/docs-mirror" \
   -state-dir "$HOME/Library/Application Support/kanon" \
   -sync-mode auto \
-  -rsync-source server-host:/root/docs/ \
+  -rsync-source ssh-alias:/path/to/docs/ \
   -rsync-bin /opt/homebrew/bin/rsync
 ```
 

@@ -1,0 +1,19 @@
+Create a simple explanatory architecture diagram for a public GitHub README.
+Audience: developers evaluating an open-source docs indexing and mirroring tool.
+Layout: left-to-right.
+Use exactly these labels and no other labels:
+1. Authoritative docs tree
+2. Kanon server
+3. Change journal
+4. SQLite FTS index
+5. Query clients
+6. Mirror client
+7. Local reading mirror
+Relationships:
+- Authoritative docs tree flows into Kanon server.
+- Kanon server writes Change journal.
+- Kanon server writes SQLite FTS index.
+- Query clients query Kanon server.
+- Mirror client connects to Kanon server.
+- Mirror client writes Local reading mirror.
+Style: minimal technical illustration, high contrast, plain light background, clean vector-like boxes and arrows, no icons unless abstract, no private filesystem paths, no machine names, no IP addresses, no extra nodes, no legend.
