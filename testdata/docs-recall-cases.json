@@ -163,10 +163,11 @@
     ]
   },
   {
-    "name": "vault bridge maintenance",
-    "query": "vault bridge maintenance",
+    "name": "kanon maintenance",
+    "query": "kanon maintenance",
     "expected": [
-      "maintenance/vault-bridge/README.md"
+      "personal-proj/kanon/README.md",
+      "maintenance/kanon/README.md"
     ],
     "limit": 10,
     "maxRank": 1

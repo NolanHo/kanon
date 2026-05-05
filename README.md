@@ -2,7 +2,7 @@
 
 # Kanon
 
-> Index `/root/docs` and mirror it to a local reading directory.
+> Path-first search and local mirroring for `/root/docs`.
 
 [![Go](https://img.shields.io/badge/Go-1.22+-00ADD8.svg)](https://go.dev/)
 [![Platform](https://img.shields.io/badge/Platform-Linux%20server%20%2B%20macOS%20client-333333.svg)](#)
@@ -14,54 +14,76 @@
 
 ---
 
-Kanon is a Go client/server system for `/root/docs`.
+Kanon is the location layer for `/root/docs`.
 
-Current responsibilities:
+It watches the authoritative Linux docs tree, maintains an incremental journal, builds a SQLite FTS index, answers query requests with document paths, and mirrors changed files to local reading directories. It does not generate answers and does not govern how docs should be written.
 
-- watch the Linux docs tree
-- maintain a file snapshot and append-only change journal
-- serve snapshot, changes, stream, and file transfer endpoints
-- mirror changed files to a local macOS reading directory
+## Design stance
 
-Planned responsibility:
+Kanon optimizes for path discovery:
 
-- build an index over `/root/docs`
-- answer query requests with document locations and routing signals
+- return document locations, not synthesized content
+- rank path, filename, title, and heading signals above body text
+- keep mirror sync as a first-class capability for human reading workflows
+- record query logs so retrieval behavior can be evaluated from real callers
+- keep the live index outside `/root/docs` so indexing does not trigger the watcher
 
-Kanon does not define how `/root/docs` should be written or organized.
-
-## How It Works
+## How it works
 
 ```mermaid
 flowchart LR
     A[/root/docs on Linux] --> B[kanon-server]
-    B --> C[Snapshot, change journal, file endpoints]
-    D[kanon-client on macOS] -->|SSH tunnel for control plane| C
-    D -->|rsync or HTTP for file transfer| A
-    D --> E[Local reading mirror]
-    F[Editor or reader] --> E
-    G[Query clients] -->|future query API| B
+    B --> C[Snapshot and change journal]
+    B --> D[SQLite FTS index]
+    E[Query clients] -->|POST /v1/query| D
+    F[kanon-client on macOS] -->|SSH tunnel for control plane| B
+    F -->|rsync or HTTP archive| A
+    F --> G[Local reading mirror]
 ```
 
 ## Components
 
 | Component | Role |
 | --- | --- |
-| `kanon-server` | Watches `/root/docs`, stores a file snapshot and append-only event log, serves HTTP endpoints |
-| `kanon-client` | Pulls incremental updates, maintains a local cursor, deletes removed files, fetches changed files |
-| `rsync` | Preferred file transfer path for changed files |
-| HTTP fallback | Used when `rsync` is unavailable or fails |
-| SSH tunnel | Lets the client reach the server control plane when the remote HTTP port is not directly accessible |
+| `kanon-server` | Watches `/root/docs`, stores a file snapshot and event journal, builds the index, serves HTTP APIs |
+| `kanon-client` | Mirrors changed files to a local directory and keeps a persistent cursor |
+| `kanon-bench` | Runs path-recall and ranking benchmarks against a live Kanon server |
+| SQLite FTS | Live lexical index with Chinese token expansion and deterministic path-first reranking |
+| Query log | JSONL record of query text, parameters, result paths, scores, and caller headers |
 
-## Quick Start
+## HTTP APIs
 
-Build:
+| Endpoint | Purpose |
+| --- | --- |
+| `GET /healthz` | server and watcher health |
+| `GET /v1/index/health` | index health, seq lag, document count |
+| `POST /v1/query` | path-first search over indexed docs |
+| `GET /v1/snapshot` | file snapshot for mirror clients |
+| `GET /v1/changes` | incremental event stream window |
+| `GET /v1/stream` | long-lived change stream |
+| `GET /v1/archive` | tar archive transfer for changed paths |
+| `GET /v1/file` | single-file transfer fallback |
+
+Query example:
 
 ```bash
-go build ./...
+curl -sS -X POST http://127.0.0.1:39090/v1/query \
+  -H 'content-type: application/json' \
+  -d '{"query":"kanon architecture","limit":5}'
 ```
 
-Start the server on the Linux host:
+## Build
+
+```bash
+go test ./...
+go build -o bin/kanon-server ./cmd/kanon-server
+go build -o bin/kanon-client ./cmd/kanon-client
+go build -o bin/kanon-bench ./cmd/kanon-bench
+```
+
+`CGO_ENABLED=1` uses jieba for Chinese tokenization. `CGO_ENABLED=0` builds without jieba and uses the Go gse fallback.
+
+## Server quick start
 
 ```bash
 ./bin/kanon-server \
@@ -71,7 +93,16 @@ Start the server on the Linux host:
   -filter-config ./config/filter.json
 ```
 
-Start the client on macOS in foreground stream mode:
+Important server files:
+
+```text
+<state-dir>/events.jsonl
+<state-dir>/snapshot.json
+<state-dir>/index.sqlite
+<state-dir>/queries.jsonl
+```
+
+## macOS mirror quick start
 
 ```bash
 ./bin/kanon-client \
@@ -86,34 +117,6 @@ Start the client on macOS in foreground stream mode:
   -rsync-bin /opt/homebrew/bin/rsync
 ```
 
-Then open the local mirror with the reader or editor of choice:
-
-```text
-$HOME/Documents/kanon
-```
-
-## Features
-
-- incremental journal with persistent cursor
-- `inotify` plus periodic reconcile on the server
-- one-shot sync and long-lived stream mode on the client
-- `rsync --files-from` as the preferred data path
-- HTTP archive fallback when `rsync` is unavailable or failing
-- built-in SSH tunnel for the HTTP control plane
-- configurable filter rules through `config/filter.json`
-
-## Configuration
-
-Server-side filter rules live in `config/filter.json`.
-
-Default behavior:
-
-- exclude `.git/`, `.obsidian/`, `.venv/`, `venv/`, `node_modules/`, `__pycache__/`, `.ruff_cache/`, `.mypy_cache/`, `.pytest_cache/`
-- exclude `.DS_Store`
-- exclude basename file patterns such as `*.log`, `*.tmp`, `*.swp`, `*.swo`
-- include `.md`, `.png`, `.jpg`, `.jpeg`, `.gif`, `.webp`, `.svg`, `.pdf`, `.canvas`
-- optionally exclude whole path subtrees or glob-style path patterns with `excluded_path_patterns`
-
 Transfer modes:
 
 | Mode | Behavior |
@@ -123,35 +126,38 @@ Transfer modes:
 | `rsync` | Require `rsync` |
 | `http` | Force one-file-at-a-time HTTP transfer |
 
-Tunnel flags:
+## Benchmark
 
-- `-tunnel-host`: SSH host that exposes the remote server port
-- `-tunnel-remote-host`: remote target host seen from the SSH server; defaults to the host part of `-server`
-- `-tunnel-remote-port`: remote target port; defaults to the port part of `-server`
-- `-tunnel-local-port`: local forwarded port; `0` means auto-pick a free port above `30000`
-- default server listen port: `39090`
+```bash
+go run ./cmd/kanon-bench \
+  -server http://127.0.0.1:39090 \
+  -cases testdata/docs-recall-cases.json \
+  -limit 10 \
+  -fail-on-case
+```
 
-## Repository Layout
+The benchmark checks recall, top1, MRR, max-rank assertions, and negative-path ordering.
+
+## Repository layout
 
 - `cmd/kanon-server/`: Linux server entrypoint
-- `cmd/kanon-client/`: macOS client entrypoint
+- `cmd/kanon-client/`: mirror client entrypoint
+- `cmd/kanon-bench/`: live-server recall benchmark
 - `internal/core/`: filter, journal store, reconcile, watcher
+- `internal/index/`: SQLite index, tokenizer, query, reranking
+- `internal/benchmark/`: benchmark evaluator
 - `internal/protocol/`: shared wire types
 - `config/`: default filter config
 - `scripts/`: server/client run scripts
 - `deploy/`: supervisor, `systemd`, and launchd examples
-- `docs/`: operator notes and environment-specific guides
+- `docs/`: operator guides
 
-## Deployment Files
+## Deployment files
 
 - Linux server: `deploy/supervisor/kanon-server.conf`
 - Linux user service: `deploy/systemd/user/kanon-server.service`
 - macOS client: `deploy/launchd/dev.kanon.client.plist`
 
-For Linux hosts that run `kanon-server` under `supervisord`, see:
+For Linux hosts that run `kanon-server` under `supervisord`, see `docs/linux-supervisord-deploy-guide.md`.
 
-- `docs/linux-supervisord-deploy-guide.md`
-
-For foreground macOS usage, see:
-
-- `docs/macos-foreground-client-guide.md`
+For foreground macOS usage, see `docs/macos-foreground-client-guide.md`.

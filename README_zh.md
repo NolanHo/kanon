@@ -2,7 +2,7 @@
 
 # Kanon
 
-> 为 `/root/docs` 建索引，并同步到本地阅读目录。
+> 面向 `/root/docs` 的路径优先搜索和本地镜像。
 
 [![Go](https://img.shields.io/badge/Go-1.22+-00ADD8.svg)](https://go.dev/)
 [![Platform](https://img.shields.io/badge/Platform-Linux%20server%20%2B%20macOS%20client-333333.svg)](#)
@@ -14,54 +14,76 @@
 
 ---
 
-Kanon 是面向 `/root/docs` 的 Go client/server 系统。
+Kanon 是 `/root/docs` 的位置层。
 
-当前职责：
+它监听 Linux 上的权威 docs 树，维护增量日志，构建 SQLite FTS 索引，查询时返回文档路径，并把变更文件同步到本地阅读目录。它不生成答案，也不规定 docs 应该如何书写。
 
-- 监听 Linux docs 树
-- 维护文件快照和追加式变更日志
-- 提供 snapshot、changes、stream、文件传输接口
-- 将变更文件同步到 macOS 本地阅读目录
+## 设计立场
 
-计划职责：
+Kanon 优化的是路径发现：
 
-- 为 `/root/docs` 建索引
-- 查询时返回文档位置和定位信号
-
-Kanon 不定义 `/root/docs` 应该如何书写或组织。
+- 返回文档位置，不生成内容
+- path、filename、title、heading 信号高于 body 文本
+- 本地镜像是人类阅读工作流的核心能力
+- 记录 query log，用真实调用分析检索行为
+- live index 放在 `/root/docs` 外，避免索引写入触发 watcher
 
 ## 工作方式
 
 ```mermaid
 flowchart LR
     A[Linux 上的 /root/docs] --> B[kanon-server]
-    B --> C[快照、变更日志、文件接口]
-    D[macOS 上的 kanon-client] -->|通过 SSH 隧道访问 control plane| C
-    D -->|通过 rsync 或 HTTP 拉文件| A
-    D --> E[本地阅读镜像]
-    F[编辑器或阅读器] --> E
-    G[查询客户端] -->|未来 query API| B
+    B --> C[快照和变更日志]
+    B --> D[SQLite FTS 索引]
+    E[查询客户端] -->|POST /v1/query| D
+    F[macOS 上的 kanon-client] -->|SSH tunnel 访问 control plane| B
+    F -->|rsync 或 HTTP archive| A
+    F --> G[本地阅读镜像]
 ```
 
 ## 组件
 
 | 组件 | 作用 |
 | --- | --- |
-| `kanon-server` | 监听 `/root/docs`，维护文件快照和追加式事件日志，并暴露 HTTP 接口 |
-| `kanon-client` | 拉取增量更新，维护本地 cursor，删除失效文件，拉取变更文件 |
-| `rsync` | 变更文件的优先传输路径 |
-| HTTP fallback | `rsync` 不可用或失败时的回退路径 |
-| SSH tunnel | 当远端 HTTP 端口不能直连时，让 client 仍然能访问 control plane |
+| `kanon-server` | 监听 `/root/docs`，维护文件快照和事件日志，构建索引，提供 HTTP API |
+| `kanon-client` | 同步变更文件到本地目录，并维护持久化 cursor |
+| `kanon-bench` | 针对 live Kanon server 跑路径召回和排序 benchmark |
+| SQLite FTS | live 词法索引，包含中文 token expansion 和确定性的路径优先重排 |
+| Query log | JSONL 记录 query、参数、结果路径、分数和调用方 headers |
 
-## 快速开始
+## HTTP API
 
-构建：
+| Endpoint | 用途 |
+| --- | --- |
+| `GET /healthz` | server 和 watcher 健康状态 |
+| `GET /v1/index/health` | index 健康状态、seq lag、文档数量 |
+| `POST /v1/query` | 对 indexed docs 做路径优先搜索 |
+| `GET /v1/snapshot` | mirror client 使用的文件快照 |
+| `GET /v1/changes` | 增量事件窗口 |
+| `GET /v1/stream` | 长连接变更流 |
+| `GET /v1/archive` | changed paths 的 tar archive 传输 |
+| `GET /v1/file` | 单文件传输 fallback |
+
+查询例子：
 
 ```bash
-go build ./...
+curl -sS -X POST http://127.0.0.1:39090/v1/query \
+  -H 'content-type: application/json' \
+  -d '{"query":"kanon architecture","limit":5}'
 ```
 
-在 Linux 主机上启动 server：
+## 构建
+
+```bash
+go test ./...
+go build -o bin/kanon-server ./cmd/kanon-server
+go build -o bin/kanon-client ./cmd/kanon-client
+go build -o bin/kanon-bench ./cmd/kanon-bench
+```
+
+`CGO_ENABLED=1` 使用 jieba 做中文分词。`CGO_ENABLED=0` 不编译 jieba，使用 Go gse fallback。
+
+## Server 快速启动
 
 ```bash
 ./bin/kanon-server \
@@ -71,7 +93,16 @@ go build ./...
   -filter-config ./config/filter.json
 ```
 
-在 macOS 上以前台 stream 模式启动 client：
+重要 server 文件：
+
+```text
+<state-dir>/events.jsonl
+<state-dir>/snapshot.json
+<state-dir>/index.sqlite
+<state-dir>/queries.jsonl
+```
+
+## macOS 镜像快速启动
 
 ```bash
 ./bin/kanon-client \
@@ -86,61 +117,40 @@ go build ./...
   -rsync-bin /opt/homebrew/bin/rsync
 ```
 
-第一次同步完成后，用任意本地阅读器或编辑器打开：
-
-```text
-$HOME/Documents/kanon
-```
-
-## 功能
-
-- 增量事件日志和持久化 cursor
-- server 端使用 `inotify` 加周期性全量 reconcile
-- client 支持 one-shot 和长连接 stream 模式
-- 文件传输优先使用 `rsync --files-from`
-- `rsync` 不可用或失败时回退到 HTTP archive 传输
-- client 内置 SSH 隧道支持 HTTP control plane
-- 通过 `config/filter.json` 配置过滤规则
-
-## 配置
-
-server 端过滤规则放在 `config/filter.json`。
-
-默认行为：
-
-- 排除 `.git/`、`.obsidian/`、`.venv/`、`venv/`、`node_modules/`、`__pycache__/`、`.ruff_cache/`、`.mypy_cache/`、`.pytest_cache/`
-- 排除 `.DS_Store`
-- 排除 `*.log`、`*.tmp`、`*.swp`、`*.swo` 等 basename 文件模式
-- 只包含 `.md`、`.png`、`.jpg`、`.jpeg`、`.gif`、`.webp`、`.svg`、`.pdf`、`.canvas`
-- 可以通过 `excluded_path_patterns` 额外排除整棵路径子树或 glob 风格路径模式
-
 传输模式：
 
 | 模式 | 行为 |
 | --- | --- |
-| `auto` | 先尝试 `rsync`，失败时回退到 HTTP archive 传输 |
-| `archive` | 强制使用 HTTP archive 传输 |
+| `auto` | 先尝试 `rsync`，失败后回退到 HTTP archive |
+| `archive` | 强制使用 HTTP archive |
 | `rsync` | 强制要求 `rsync` |
-| `http` | 强制使用逐文件 HTTP 拉取 |
+| `http` | 强制逐文件 HTTP 拉取 |
 
-隧道参数：
+## Benchmark
 
-- `-tunnel-host`: 用来暴露远端 server 端口的 SSH host
-- `-tunnel-remote-host`: 从 SSH server 视角访问的远端目标 host；默认取 `-server` 的 host 部分
-- `-tunnel-remote-port`: 远端目标端口；默认取 `-server` 的 port 部分
-- `-tunnel-local-port`: 本地转发端口；`0` 表示自动挑一个大于 `30000` 的空闲端口
-- server 默认监听端口：`39090`
+```bash
+go run ./cmd/kanon-bench \
+  -server http://127.0.0.1:39090 \
+  -cases testdata/docs-recall-cases.json \
+  -limit 10 \
+  -fail-on-case
+```
+
+Benchmark 检查 recall、top1、MRR、max-rank 断言和 negative-path 排序。
 
 ## 仓库结构
 
 - `cmd/kanon-server/`: Linux server 入口
-- `cmd/kanon-client/`: macOS client 入口
+- `cmd/kanon-client/`: mirror client 入口
+- `cmd/kanon-bench/`: live-server recall benchmark
 - `internal/core/`: filter、journal store、reconcile、watcher
+- `internal/index/`: SQLite index、tokenizer、query、reranking
+- `internal/benchmark/`: benchmark evaluator
 - `internal/protocol/`: 共享协议结构
 - `config/`: 默认过滤配置
 - `scripts/`: server/client 运行脚本
 - `deploy/`: supervisor、`systemd`、launchd 示例
-- `docs/`: 运维说明和环境相关指南
+- `docs/`: 运维指南
 
 ## 部署文件
 
@@ -148,10 +158,6 @@ server 端过滤规则放在 `config/filter.json`。
 - Linux user service: `deploy/systemd/user/kanon-server.service`
 - macOS client: `deploy/launchd/dev.kanon.client.plist`
 
-如果 Linux 主机上的 `kanon-server` 由 `supervisord` 托管，见：
+Linux host 使用 `supervisord` 托管 `kanon-server` 时，见 `docs/linux-supervisord-deploy-guide.md`。
 
-- `docs/linux-supervisord-deploy-guide.md`
-
-如果你是在 macOS 终端前台运行，见：
-
-- `docs/macos-foreground-client-guide.md`
+macOS 前台运行方式见 `docs/macos-foreground-client-guide.md`。
