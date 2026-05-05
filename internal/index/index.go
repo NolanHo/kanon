@@ -18,7 +18,6 @@ import (
 
 	"github.com/NolanHo/kanon/internal/core"
 	"github.com/NolanHo/kanon/internal/protocol"
-	"github.com/go-ego/gse"
 	_ "modernc.org/sqlite"
 )
 
@@ -33,7 +32,7 @@ type Index struct {
 	path   string
 	lastMu sync.RWMutex
 	last   error
-	seg    *gse.Segmenter
+	tok    chineseTokenizer
 }
 
 type Health struct {
@@ -98,13 +97,7 @@ func Open(root, dbPath string) (*Index, error) {
 		return nil, err
 	}
 	db.SetMaxOpenConns(1)
-	seg, err := gse.NewEmbed()
-	if err != nil {
-		_ = db.Close()
-		return nil, err
-	}
-	addDomainTokens(&seg)
-	idx := &Index{db: db, root: rootAbs, path: dbPath, seg: &seg}
+	idx := &Index{db: db, root: rootAbs, path: dbPath, tok: newChineseTokenizer()}
 	if err := idx.migrate(); err != nil {
 		_ = db.Close()
 		return nil, err
@@ -114,16 +107,6 @@ func Open(root, dbPath string) (*Index, error) {
 		return nil, err
 	}
 	return idx, nil
-}
-
-func addDomainTokens(seg *gse.Segmenter) {
-	for _, token := range []string{
-		"知识库", "运行时", "观测", "遥测", "上下文", "索引", "文档", "路由", "看板", "工作区",
-		"Kanon", "ActRail", "TwinPulse", "TermDeck", "MinT", "OpenClaw",
-		"pi-agent", "pi-knowledge-base", "pi-runtime", "obsh", "Context7",
-	} {
-		_ = seg.AddToken(token, 100000, "nz")
-	}
 }
 
 func aliasExpansions(query string) []string {
@@ -148,6 +131,9 @@ func aliasExpansions(query string) []string {
 }
 
 func (idx *Index) Close() error {
+	if idx.tok != nil {
+		idx.tok.Close()
+	}
 	return idx.db.Close()
 }
 
@@ -688,19 +674,10 @@ func (idx *Index) tokenSet(text string) map[string]struct{} {
 }
 
 func (idx *Index) segmentChinese(text string) []string {
-	if idx.seg == nil || !hasCJK(text) {
+	if idx.tok == nil || !hasCJK(text) {
 		return nil
 	}
-	words := idx.seg.CutSearch(text, true)
-	out := make([]string, 0, len(words))
-	for _, word := range words {
-		word = strings.TrimSpace(strings.ToLower(word))
-		if word == "" || !hasCJK(word) {
-			continue
-		}
-		out = append(out, word)
-	}
-	return out
+	return idx.tok.SearchTokens(text)
 }
 
 func latinTokens(text string) []string {
