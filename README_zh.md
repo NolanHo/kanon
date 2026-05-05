@@ -10,6 +10,8 @@
 
 [English](./README.md) · [macOS 前台运行指南](./docs/macos-foreground-client-guide.md) · [Linux supervisord 部署指南](./docs/linux-supervisord-deploy-guide.md)
 
+<img src="./docs/assets/kanon.png" alt="Kanon brand image" width="760">
+
 </div>
 
 ---
@@ -30,8 +32,7 @@ Kanon 优化的是路径发现：
 
 ## 工作方式
 
-<img src="./assets/kanon-architecture-overview.svg" alt="Kanon architecture overview" width="760">
-
+<img src="./docs/assets/kanon-architecture.png" alt="Kanon architecture overview" width="760">
 
 ## 组件
 
