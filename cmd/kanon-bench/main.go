@@ -30,6 +30,7 @@ func main() {
 	limit := flag.Int("limit", 10, "default query limit")
 	jsonOut := flag.Bool("json", false, "print full JSON result")
 	failUnder := flag.Float64("fail-under", 0, "exit nonzero when recall is below this value")
+	failOnCase := flag.Bool("fail-on-case", false, "exit nonzero when any case misses maxRank or negative assertions")
 	flag.Parse()
 
 	cases, err := benchmark.LoadCases(*casesPath)
@@ -74,6 +75,9 @@ func main() {
 		benchmark.PrintText(os.Stdout, result)
 	}
 	if *failUnder > 0 && result.Recall < *failUnder {
+		os.Exit(1)
+	}
+	if *failOnCase && result.Failures > 0 {
 		os.Exit(1)
 	}
 }
