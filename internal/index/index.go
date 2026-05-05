@@ -10,16 +10,19 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 	"sync"
 	"time"
+	"unicode"
 
 	"github.com/NolanHo/kanon/internal/core"
 	"github.com/NolanHo/kanon/internal/protocol"
+	"github.com/go-ego/gse"
 	_ "modernc.org/sqlite"
 )
 
-const schemaVersion = "1"
+const schemaVersion = "2"
 
 const defaultEventBatchLimit = 1000
 
@@ -30,6 +33,7 @@ type Index struct {
 	path   string
 	lastMu sync.RWMutex
 	last   error
+	seg    *gse.Segmenter
 }
 
 type Health struct {
@@ -94,7 +98,13 @@ func Open(root, dbPath string) (*Index, error) {
 		return nil, err
 	}
 	db.SetMaxOpenConns(1)
-	idx := &Index{db: db, root: rootAbs, path: dbPath}
+	seg, err := gse.NewEmbed()
+	if err != nil {
+		_ = db.Close()
+		return nil, err
+	}
+	addDomainTokens(&seg)
+	idx := &Index{db: db, root: rootAbs, path: dbPath, seg: &seg}
 	if err := idx.migrate(); err != nil {
 		_ = db.Close()
 		return nil, err
@@ -104,6 +114,37 @@ func Open(root, dbPath string) (*Index, error) {
 		return nil, err
 	}
 	return idx, nil
+}
+
+func addDomainTokens(seg *gse.Segmenter) {
+	for _, token := range []string{
+		"知识库", "运行时", "观测", "遥测", "上下文", "索引", "文档", "路由", "看板", "工作区",
+		"Kanon", "ActRail", "TwinPulse", "TermDeck", "MinT", "OpenClaw",
+		"pi-agent", "pi-knowledge-base", "pi-runtime", "obsh", "Context7",
+	} {
+		_ = seg.AddToken(token, 100000, "nz")
+	}
+}
+
+func aliasExpansions(query string) []string {
+	lower := strings.ToLower(query)
+	aliases := map[string][]string{
+		"知识库": {"knowledge base", "knowledge-base", "pi-knowledge-base", "kanon"},
+		"运行时": {"runtime", "pi-runtime"},
+		"观测":  {"observability", "obsh", "grafana"},
+		"遥测":  {"telemetry", "observability"},
+		"上下文": {"context", "context management"},
+		"索引":  {"index", "indexer", "sqlite", "fts"},
+		"文档":  {"docs", "documents", "root docs"},
+		"路由":  {"routing", "router"},
+	}
+	out := []string{}
+	for term, expansions := range aliases {
+		if strings.Contains(lower, strings.ToLower(term)) {
+			out = append(out, expansions...)
+		}
+	}
+	return out
 }
 
 func (idx *Index) Close() error {
@@ -127,7 +168,8 @@ func (idx *Index) migrate() error {
 			event_seq integer not null,
 			indexed_at text not null
 		)`,
-		`create virtual table if not exists documents_fts using fts5(path, title, headings, body)`,
+		`drop table if exists documents_fts`,
+		`create virtual table documents_fts using fts5(path, title, headings, body, path_tokens, title_tokens, heading_tokens, body_tokens)`,
 		`create table if not exists aliases (
 			term text not null,
 			expansion text not null,
@@ -315,6 +357,10 @@ func (idx *Index) writeDocument(ctx context.Context, fields documentFields) erro
 		return err
 	}
 	headingsText := strings.Join(fields.Headings, "\n")
+	pathTokens := idx.searchTokens(fields.Path)
+	titleTokens := idx.searchTokens(fields.Title)
+	headingTokens := idx.searchTokens(headingsText)
+	bodyTokens := idx.searchTokens(fields.Body)
 	now := time.Now().UTC().Format(time.RFC3339)
 	tx, err := idx.db.BeginTx(ctx, nil)
 	if err != nil {
@@ -338,7 +384,7 @@ func (idx *Index) writeDocument(ctx context.Context, fields documentFields) erro
 		if _, err := tx.ExecContext(ctx, `delete from documents_fts where rowid = ?`, id); err != nil {
 			return err
 		}
-		if _, err := tx.ExecContext(ctx, `insert into documents_fts(rowid, path, title, headings, body) values (?, ?, ?, ?, ?)`, id, fields.Path, fields.Title, headingsText, fields.Body); err != nil {
+		if _, err := tx.ExecContext(ctx, `insert into documents_fts(rowid, path, title, headings, body, path_tokens, title_tokens, heading_tokens, body_tokens) values (?, ?, ?, ?, ?, ?, ?, ?, ?)`, id, fields.Path, fields.Title, headingsText, fields.Body, pathTokens, titleTokens, headingTokens, bodyTokens); err != nil {
 			return err
 		}
 	} else {
@@ -350,7 +396,7 @@ func (idx *Index) writeDocument(ctx context.Context, fields documentFields) erro
 		if err != nil {
 			return err
 		}
-		if _, err := tx.ExecContext(ctx, `insert into documents_fts(rowid, path, title, headings, body) values (?, ?, ?, ?, ?)`, id, fields.Path, fields.Title, headingsText, fields.Body); err != nil {
+		if _, err := tx.ExecContext(ctx, `insert into documents_fts(rowid, path, title, headings, body, path_tokens, title_tokens, heading_tokens, body_tokens) values (?, ?, ?, ?, ?, ?, ?, ?, ?)`, id, fields.Path, fields.Title, headingsText, fields.Body, pathTokens, titleTokens, headingTokens, bodyTokens); err != nil {
 			return err
 		}
 	}
@@ -406,7 +452,7 @@ func (idx *Index) Query(ctx context.Context, req QueryRequest, currentSeq int64)
 	if q == "" {
 		return QueryResponse{Query: q, Limit: limit, Index: health}, nil
 	}
-	ftsQuery := buildFTSQuery(q)
+	ftsQuery := idx.buildFTSQuery(q)
 	if ftsQuery == "" {
 		return QueryResponse{Query: q, Limit: limit, Index: health}, nil
 	}
@@ -425,7 +471,7 @@ func (idx *Index) Query(ctx context.Context, req QueryRequest, currentSeq int64)
 		args = append(args, req.Kind)
 	}
 	args = append(args, limit)
-	query := fmt.Sprintf(`select d.path, coalesce(d.title, ''), d.headings_json, d.kind, substr(documents_fts.body, 1, 80), bm25(documents_fts, 6.0, 4.0, 2.0, 1.0) as rank
+	query := fmt.Sprintf(`select d.path, coalesce(d.title, ''), d.headings_json, d.kind, substr(documents_fts.body, 1, 80), bm25(documents_fts, 8.0, 5.0, 3.0, 1.0, 10.0, 7.0, 4.0, 2.0) as rank
 		from documents_fts join documents d on d.id = documents_fts.rowid
 		where %s
 		order by rank asc, d.path asc
@@ -517,76 +563,6 @@ func (idx *Index) LastError() error {
 	return idx.last
 }
 
-func parseMarkdownFields(body, fallbackTitle string) (string, []string) {
-	headings := []string{}
-	for _, line := range strings.Split(body, "\n") {
-		trimmed := strings.TrimSpace(line)
-		if !strings.HasPrefix(trimmed, "#") {
-			continue
-		}
-		trimmed = strings.TrimLeft(trimmed, "#")
-		trimmed = strings.TrimSpace(trimmed)
-		if trimmed == "" {
-			continue
-		}
-		headings = append(headings, trimmed)
-	}
-	title := fallbackTitle
-	if len(headings) > 0 {
-		title = headings[0]
-	}
-	return title, headings
-}
-
-func kindForPath(path string) string {
-	lower := strings.ToLower(path)
-	switch {
-	case strings.HasSuffix(lower, ".md"):
-		return "markdown"
-	case strings.HasSuffix(lower, ".pdf"):
-		return "pdf"
-	case strings.HasSuffix(lower, ".canvas"):
-		return "canvas"
-	case strings.HasSuffix(lower, ".png"), strings.HasSuffix(lower, ".jpg"), strings.HasSuffix(lower, ".jpeg"), strings.HasSuffix(lower, ".gif"), strings.HasSuffix(lower, ".webp"), strings.HasSuffix(lower, ".svg"):
-		return "image"
-	default:
-		return "file"
-	}
-}
-
-func buildFTSQuery(query string) string {
-	tokens := queryTokens(query)
-	if len(tokens) == 0 {
-		return ""
-	}
-	quoted := make([]string, 0, len(tokens))
-	for _, token := range tokens {
-		quoted = append(quoted, `"`+strings.ReplaceAll(token, `"`, `""`)+`"`)
-	}
-	return strings.Join(quoted, " OR ")
-}
-
-func queryTokens(query string) []string {
-	fields := strings.FieldsFunc(strings.ToLower(query), func(r rune) bool {
-		return !(r >= 'a' && r <= 'z' || r >= '0' && r <= '9' || r == '_' || r == '-' || r == '.' || r == '/')
-	})
-	seen := map[string]struct{}{}
-	out := []string{}
-	for _, field := range fields {
-		for _, token := range strings.FieldsFunc(field, func(r rune) bool { return r == '_' || r == '-' || r == '.' || r == '/' }) {
-			if len(token) < 2 {
-				continue
-			}
-			if _, ok := seen[token]; ok {
-				continue
-			}
-			seen[token] = struct{}{}
-			out = append(out, token)
-		}
-	}
-	return out
-}
-
 func cleanOptionalPrefix(prefix string) (string, error) {
 	prefix = strings.Trim(strings.TrimSpace(prefix), "/")
 	if prefix == "" {
@@ -632,4 +608,168 @@ func sleepOrDone(ctx context.Context, d time.Duration) bool {
 	case <-ctx.Done():
 		return false
 	}
+}
+
+func parseMarkdownFields(body, fallbackTitle string) (string, []string) {
+	headings := []string{}
+	for _, line := range strings.Split(body, "\n") {
+		trimmed := strings.TrimSpace(line)
+		if !strings.HasPrefix(trimmed, "#") {
+			continue
+		}
+		trimmed = strings.TrimLeft(trimmed, "#")
+		trimmed = strings.TrimSpace(trimmed)
+		if trimmed == "" {
+			continue
+		}
+		headings = append(headings, trimmed)
+	}
+	title := fallbackTitle
+	if len(headings) > 0 {
+		title = headings[0]
+	}
+	return title, headings
+}
+
+func kindForPath(path string) string {
+	lower := strings.ToLower(path)
+	switch {
+	case strings.HasSuffix(lower, ".md"):
+		return "markdown"
+	case strings.HasSuffix(lower, ".pdf"):
+		return "pdf"
+	case strings.HasSuffix(lower, ".canvas"):
+		return "canvas"
+	case strings.HasSuffix(lower, ".png"), strings.HasSuffix(lower, ".jpg"), strings.HasSuffix(lower, ".jpeg"), strings.HasSuffix(lower, ".gif"), strings.HasSuffix(lower, ".webp"), strings.HasSuffix(lower, ".svg"):
+		return "image"
+	default:
+		return "file"
+	}
+}
+
+func (idx *Index) buildFTSQuery(query string) string {
+	tokens := idx.queryTokens(query)
+	if len(tokens) == 0 {
+		return ""
+	}
+	quoted := make([]string, 0, len(tokens))
+	for _, token := range tokens {
+		quoted = append(quoted, `"`+strings.ReplaceAll(token, `"`, `""`)+`"`)
+	}
+	return strings.Join(quoted, " OR ")
+}
+
+func (idx *Index) queryTokens(query string) []string {
+	tokens := idx.tokenSet(query)
+	for _, expansion := range aliasExpansions(query) {
+		for token := range idx.tokenSet(expansion) {
+			tokens[token] = struct{}{}
+		}
+	}
+	return sortedTokens(tokens)
+}
+
+func (idx *Index) searchTokens(text string) string {
+	return strings.Join(sortedTokens(idx.tokenSet(text)), " ")
+}
+
+func (idx *Index) tokenSet(text string) map[string]struct{} {
+	out := map[string]struct{}{}
+	for _, token := range latinTokens(text) {
+		out[token] = struct{}{}
+	}
+	for _, token := range idx.segmentChinese(text) {
+		out[token] = struct{}{}
+	}
+	for _, gram := range cjkGrams(text) {
+		out[gram] = struct{}{}
+	}
+	return out
+}
+
+func (idx *Index) segmentChinese(text string) []string {
+	if idx.seg == nil || !hasCJK(text) {
+		return nil
+	}
+	words := idx.seg.CutSearch(text, true)
+	out := make([]string, 0, len(words))
+	for _, word := range words {
+		word = strings.TrimSpace(strings.ToLower(word))
+		if word == "" || !hasCJK(word) {
+			continue
+		}
+		out = append(out, word)
+	}
+	return out
+}
+
+func latinTokens(text string) []string {
+	fields := strings.FieldsFunc(strings.ToLower(text), func(r rune) bool {
+		return !(r >= 'a' && r <= 'z' || r >= '0' && r <= '9' || r == '_' || r == '-' || r == '.' || r == '/')
+	})
+	seen := map[string]struct{}{}
+	out := []string{}
+	for _, field := range fields {
+		for _, token := range strings.FieldsFunc(field, func(r rune) bool { return r == '_' || r == '-' || r == '.' || r == '/' }) {
+			if len(token) < 2 {
+				continue
+			}
+			if _, ok := seen[token]; ok {
+				continue
+			}
+			seen[token] = struct{}{}
+			out = append(out, token)
+		}
+	}
+	return out
+}
+
+func cjkGrams(text string) []string {
+	runes := []rune{}
+	for _, r := range text {
+		if isCJK(r) {
+			runes = append(runes, r)
+			continue
+		}
+		if len(runes) > 0 {
+			break
+		}
+	}
+	seen := map[string]struct{}{}
+	out := []string{}
+	for n := 2; n <= 3; n++ {
+		for i := 0; i+n <= len(runes); i++ {
+			gram := string(runes[i : i+n])
+			if _, ok := seen[gram]; ok {
+				continue
+			}
+			seen[gram] = struct{}{}
+			out = append(out, gram)
+		}
+	}
+	return out
+}
+
+func hasCJK(text string) bool {
+	for _, r := range text {
+		if isCJK(r) {
+			return true
+		}
+	}
+	return false
+}
+
+func isCJK(r rune) bool {
+	return unicode.Is(unicode.Han, r) || unicode.Is(unicode.Hiragana, r) || unicode.Is(unicode.Katakana, r)
+}
+
+func sortedTokens(tokens map[string]struct{}) []string {
+	out := make([]string, 0, len(tokens))
+	for token := range tokens {
+		if strings.TrimSpace(token) != "" {
+			out = append(out, token)
+		}
+	}
+	sort.Strings(out)
+	return out
 }
