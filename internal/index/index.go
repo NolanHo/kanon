@@ -8,6 +8,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"math"
 	"os"
 	"path/filepath"
 	"sort"
@@ -463,7 +464,14 @@ func (idx *Index) Query(ctx context.Context, req QueryRequest, currentSeq int64)
 		where = append(where, "d.kind = ?")
 		args = append(args, req.Kind)
 	}
-	args = append(args, limit)
+	candidateLimit := limit * 20
+	if candidateLimit < 100 {
+		candidateLimit = 100
+	}
+	if candidateLimit > 500 {
+		candidateLimit = 500
+	}
+	args = append(args, candidateLimit)
 	query := fmt.Sprintf(`select d.path, coalesce(d.title, ''), d.headings_json, d.kind, substr(documents_fts.body, 1, 80), bm25(documents_fts, 8.0, 5.0, 3.0, 1.0, 10.0, 7.0, 4.0, 2.0) as rank
 		from documents_fts join documents d on d.id = documents_fts.rowid
 		where %s
@@ -496,7 +504,151 @@ func (idx *Index) Query(ctx context.Context, req QueryRequest, currentSeq int64)
 	if err := rows.Err(); err != nil {
 		return QueryResponse{}, err
 	}
+	matches = idx.rerankMatches(q, matches)
+	if len(matches) > limit {
+		matches = matches[:limit]
+	}
 	return QueryResponse{Query: q, Limit: limit, Index: health, Matches: matches}, nil
+}
+
+func (idx *Index) rerankMatches(query string, matches []QueryMatch) []QueryMatch {
+	features := idx.queryFeatures(query)
+	for i := range matches {
+		matches[i].Score = idx.rerankScore(matches[i], features)
+	}
+	sort.SliceStable(matches, func(i, j int) bool {
+		if matches[i].Score != matches[j].Score {
+			return matches[i].Score > matches[j].Score
+		}
+		return matches[i].Path < matches[j].Path
+	})
+	return matches
+}
+
+type queryFeatures struct {
+	Original []string
+	Alias    []string
+	Phrase   string
+}
+
+func (idx *Index) queryFeatures(query string) queryFeatures {
+	original := sortedTokens(idx.tokenSet(query))
+	aliasSet := map[string]struct{}{}
+	originalSet := map[string]struct{}{}
+	for _, token := range original {
+		originalSet[token] = struct{}{}
+	}
+	for _, expansion := range aliasExpansions(query) {
+		for token := range idx.tokenSet(expansion) {
+			if _, ok := originalSet[token]; !ok {
+				aliasSet[token] = struct{}{}
+			}
+		}
+	}
+	return queryFeatures{Original: original, Alias: sortedTokens(aliasSet), Phrase: strings.ToLower(strings.TrimSpace(query))}
+}
+
+func (idx *Index) rerankScore(match QueryMatch, features queryFeatures) float64 {
+	path := strings.ToLower(match.Path)
+	title := strings.ToLower(match.Title)
+	heading := strings.ToLower(match.Heading)
+	snippet := strings.ToLower(match.Snippet)
+	pathSegments := pathTokenSet(path)
+	pathHits := tokenHits(features.Original, path)
+	titleHits := tokenHits(features.Original, title)
+	headingHits := tokenHits(features.Original, heading)
+	bodyHits := tokenHits(features.Original, snippet)
+	aliasPathHits := tokenHits(features.Alias, path)
+	aliasTitleHits := tokenHits(features.Alias, title)
+	aliasHeadingHits := tokenHits(features.Alias, heading)
+	aliasBodyHits := tokenHits(features.Alias, snippet)
+	segmentHits := tokenSetHits(features.Original, pathSegments)
+	filenameHits := tokenHits(features.Original, strings.ToLower(filepath.Base(match.Path)))
+	score := match.Score
+	score += 140 * coverage(features.Original, pathHits)
+	score += 130 * coverage(features.Original, segmentHits)
+	score += 110 * coverage(features.Original, filenameHits)
+	score += 100 * coverage(features.Original, titleHits)
+	score += 70 * coverage(features.Original, headingHits)
+	score += 20 * coverage(features.Original, bodyHits)
+	score += 35 * coverage(features.Alias, aliasPathHits)
+	score += 25 * coverage(features.Alias, aliasTitleHits)
+	score += 15 * coverage(features.Alias, aliasHeadingHits)
+	score += 3 * coverage(features.Alias, aliasBodyHits)
+	if containsNormalizedPhrase(path, features.Phrase) {
+		score += 160
+	}
+	if containsNormalizedPhrase(title, features.Phrase) {
+		score += 120
+	}
+	if len(features.Original) > 0 && segmentHits == len(features.Original) {
+		score += 120
+	}
+	if len(features.Original) > 0 && pathHits == 0 && titleHits == 0 && headingHits == 0 && bodyHits > 0 {
+		score -= 60
+	}
+	if aliasBodyHits > 0 && pathHits == 0 && titleHits == 0 && headingHits == 0 {
+		score -= 40
+	}
+	if strings.HasSuffix(path, "_zh.md") {
+		score -= 35
+	}
+	if strings.HasSuffix(path, "/progress.md") || strings.HasSuffix(path, "/worklog.md") || strings.HasSuffix(path, "/todo.md") {
+		score -= 25
+	}
+	if strings.HasSuffix(path, "/readme.md") && pathHits+titleHits+headingHits > 0 {
+		score += 15
+	}
+	return math.Round(score*1000) / 1000
+}
+
+func tokenHits(tokens []string, text string) int {
+	if text == "" {
+		return 0
+	}
+	hits := 0
+	for _, token := range tokens {
+		if strings.Contains(text, strings.ToLower(token)) {
+			hits++
+		}
+	}
+	return hits
+}
+
+func tokenSetHits(tokens []string, set map[string]struct{}) int {
+	hits := 0
+	for _, token := range tokens {
+		if _, ok := set[strings.ToLower(token)]; ok {
+			hits++
+		}
+	}
+	return hits
+}
+
+func coverage(tokens []string, hits int) float64 {
+	if len(tokens) == 0 || hits == 0 {
+		return 0
+	}
+	return float64(hits) / float64(len(tokens))
+}
+
+func pathTokenSet(path string) map[string]struct{} {
+	out := map[string]struct{}{}
+	fields := strings.FieldsFunc(path, func(r rune) bool { return r == '/' || r == '-' || r == '_' || r == '.' })
+	for _, field := range fields {
+		field = strings.ToLower(strings.TrimSpace(field))
+		if len(field) >= 2 {
+			out[field] = struct{}{}
+		}
+	}
+	return out
+}
+
+func containsNormalizedPhrase(text, phrase string) bool {
+	if phrase == "" {
+		return false
+	}
+	return strings.Contains(strings.ReplaceAll(text, "-", " "), strings.ReplaceAll(phrase, "-", " "))
 }
 
 func (idx *Index) IndexedSeq(ctx context.Context) (int64, error) {
