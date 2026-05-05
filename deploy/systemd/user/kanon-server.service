@@ -9,7 +9,7 @@ Environment=ADDR=:39090
 Environment=ROOT=/root/docs
 Environment=STATE_DIR=%h/.local/state/kanon/server
 Environment=CONFIG_FILE=/opt/kanon/config/filter.json
-Environment=RECONCILE_INTERVAL=30m
+Environment=RECONCILE_INTERVAL=1h
 Environment=WATCH_DEBOUNCE=200ms
 Environment=BUILD_ON_RUN=0
 ExecStart=/opt/kanon/scripts/run-kanon-server.sh

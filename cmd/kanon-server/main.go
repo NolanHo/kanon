@@ -27,7 +27,7 @@ func main() {
 	root := flag.String("root", "/root/docs", "authoritative content root on linux")
 	stateDir := flag.String("state-dir", os.ExpandEnv("$HOME/.local/state/kanon/server"), "server state directory")
 	filterConfig := flag.String("filter-config", "", "optional filter config file")
-	reconcileInterval := flag.Duration("reconcile-interval", 30*time.Minute, "full reconcile interval")
+	reconcileInterval := flag.Duration("reconcile-interval", time.Hour, "full reconcile interval")
 	watchDebounce := flag.Duration("watch-debounce", 200*time.Millisecond, "delay before reconciling after watcher activity")
 	flag.Parse()
 
