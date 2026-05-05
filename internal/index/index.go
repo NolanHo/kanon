@@ -183,7 +183,11 @@ func (idx *Index) Bootstrap(ctx context.Context, currentSeq int64, files map[str
 	if err != nil {
 		return err
 	}
-	if indexedSeq >= currentSeq && count > 0 {
+	ftsCount, err := idx.FTSCount(ctx)
+	if err != nil {
+		return err
+	}
+	if indexedSeq >= currentSeq && count > 0 && ftsCount == count {
 		return nil
 	}
 	paths := make([]string, 0, len(files))
@@ -363,6 +367,9 @@ func (idx *Index) writeDocument(ctx context.Context, fields documentFields) erro
 		if _, err := tx.ExecContext(ctx, `update documents set size = ?, mtime_ns = ?, event_seq = ?, indexed_at = ? where id = ?`, fields.Size, fields.MtimeNS, fields.EventSeq, now, id); err != nil {
 			return err
 		}
+		if _, err := tx.ExecContext(ctx, `insert or replace into documents_fts(rowid, path, title, headings, body, path_tokens, title_tokens, heading_tokens, body_tokens) values (?, ?, ?, ?, ?, ?, ?, ?, ?)`, id, fields.Path, fields.Title, headingsText, fields.Body, pathTokens, titleTokens, headingTokens, bodyTokens); err != nil {
+			return err
+		}
 	} else if err == nil {
 		if _, err := tx.ExecContext(ctx, `update documents set title = ?, headings_json = ?, kind = ?, size = ?, mtime_ns = ?, sha256 = ?, event_seq = ?, indexed_at = ? where id = ?`, fields.Title, string(headingsJSON), fields.Kind, fields.Size, fields.MtimeNS, fields.SHA256, fields.EventSeq, now, id); err != nil {
 			return err
@@ -449,7 +456,7 @@ func (idx *Index) Query(ctx context.Context, req QueryRequest, currentSeq int64)
 		if err != nil {
 			return QueryResponse{}, err
 		}
-		where = append(where, "d.path = ? or d.path like ?")
+		where = append(where, "(d.path = ? or d.path like ?)")
 		args = append(args, prefix, prefix+"/%")
 	}
 	if req.Kind != "" {
@@ -508,6 +515,12 @@ func (idx *Index) IndexedSeq(ctx context.Context) (int64, error) {
 func (idx *Index) DocumentCount(ctx context.Context) (int64, error) {
 	var count int64
 	err := idx.db.QueryRowContext(ctx, `select count(*) from documents`).Scan(&count)
+	return count, err
+}
+
+func (idx *Index) FTSCount(ctx context.Context) (int64, error) {
+	var count int64
+	err := idx.db.QueryRowContext(ctx, `select count(*) from documents_fts`).Scan(&count)
 	return count, err
 }
 
